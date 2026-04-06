@@ -17,6 +17,7 @@ Carapace implements the full **MCP v1.0.0** specification, enabling secure synch
 ### 🧭 Discovery Hub & Registry
 A persistent **SQLite-backed registry** that tracks your expert node ecosystem.
 *   **Automated Seeding**: Default community nodes (Cloud Researcher, Logic Architect) are available out-of-the-box.
+*   **Agent Skill Support**: Agents can now ingest **[SKILL.md](file:///Users/deji.omisore/projects/carapace/SKILL.md)** to learn how to securely pair with Carapace.
 *   **Category-Specific Icons**: High-fidelity visual mapping (Compass, CPU, Terminal) for instant recognition.
 
 ### 🛠️ Dynamic Tool Drawer
