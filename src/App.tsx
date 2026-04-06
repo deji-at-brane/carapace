@@ -12,17 +12,26 @@ import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { DiscoveryGrid } from "@/components/DiscoveryGrid";
 import { Agent } from "@/components/AgentCard";
 import { ToolDrawer } from "@/components/ToolDrawer";
+import { PairingOverlay, PairingStep } from "@/components/PairingOverlay";
 import { TerminalCanvas, TerminalHandle } from "@/components/TerminalCanvas";
-import { MCPClient, createTransport, MCPTool } from "@/lib/mcp";
+import { MCPClient, createTransport, MCPTool, parseAgentUri, ClawPairingManager } from "@/lib/mcp";
 import { CarapaceDB } from "@/lib/db";
 import { cn } from "@/lib/utils";
 import "./App.css";
+
+const INITIAL_PAIRING_STEPS: PairingStep[] = [
+  { id: "handshake", label: "Protocol Negotiation", status: "waiting" },
+  { id: "approval", label: "Host Approval", status: "waiting" },
+  { id: "finalize", label: "Credential Sync", status: "waiting" }
+];
 
 function App() {
   const [showTerminal, setShowTerminal] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [availableTools, setAvailableTools] = useState<MCPTool[]>([]);
   const [currentClient, setCurrentClient] = useState<MCPClient | null>(null);
+  const [pairingTask, setPairingTask] = useState<{ active: boolean; error: string | null } | null>(null);
+  const [pairingSteps, setPairingSteps] = useState<PairingStep[]>(INITIAL_PAIRING_STEPS);
   const terminalRef = useRef<TerminalHandle>(null);
 
   const handleConnect = async (agent: Agent) => {
@@ -63,6 +72,12 @@ function App() {
   const handleDirectConnect = () => {
     if (!searchTerm.trim()) return;
     
+    if (searchTerm.startsWith("claw://")) {
+      startClawPairing(searchTerm.trim());
+      setSearchTerm("");
+      return;
+    }
+
     if (searchTerm.includes("://") || searchTerm.startsWith("http")) {
       handleConnect({
         id: "direct-node",
@@ -73,6 +88,57 @@ function App() {
         icon_name: "Activity"
       });
       setSearchTerm("");
+    }
+  };
+
+  const startClawPairing = async (uri: string) => {
+    const parsed = parseAgentUri(uri);
+    if (!parsed || !parsed.token) return;
+
+    setPairingTask({ active: true, error: null });
+    setPairingSteps(INITIAL_PAIRING_STEPS.map((s, i) => i === 0 ? { ...s, status: "active" } : s));
+
+    try {
+      // Step 1: Initiate Handshake
+      const result = await ClawPairingManager.initiate(parsed.host, parsed.token);
+      const { statusUrl, api_token, gatewayUrl } = result;
+      
+      setPairingSteps(prev => prev.map(s => s.id === "handshake" ? { ...s, status: "complete" } : s.id === "approval" ? { ...s, status: "active" } : s));
+
+      // Handle immediate approval (WebSocket flow)
+      if (api_token) {
+        setPairingSteps(prev => prev.map(s => s.id === "approval" ? { ...s, status: "complete" } : s.id === "finalize" ? { ...s, status: "active" } : s));
+        const db = await CarapaceDB.getInstance();
+        await db.saveCredential(gatewayUrl || parsed.host, api_token);
+        setPairingSteps(prev => prev.map(s => ({ ...s, status: "complete" })));
+        setTimeout(() => setPairingTask(null), 1500);
+        return;
+      }
+
+      // Step 2: Poll for Approval (REST flow)
+      let attempts = 0;
+      const checkAndPoll = async () => {
+        if (!statusUrl) throw new Error("No status URL provided by gateway.");
+        if (attempts > 40) throw new Error("Pairing timed out. Please try again.");
+        attempts++;
+        
+        const pollResult = await ClawPairingManager.pollStatus(statusUrl);
+        if (pollResult.status === "APPROVED" && pollResult.api_token) {
+          setPairingSteps(prev => prev.map(s => s.id === "approval" ? { ...s, status: "complete" } : s.id === "finalize" ? { ...s, status: "active" } : s));
+          
+          const db = await CarapaceDB.getInstance();
+          await db.saveCredential(gatewayUrl || parsed.host, pollResult.api_token);
+          
+          setPairingSteps(prev => prev.map(s => ({ ...s, status: "complete" })));
+          setTimeout(() => setPairingTask(null), 1500);
+        } else {
+          setTimeout(checkAndPoll, 3000);
+        }
+      };
+
+      await checkAndPoll();
+    } catch (error: any) {
+      setPairingTask({ active: true, error: error.message });
     }
   };
 
@@ -177,6 +243,14 @@ function App() {
         </header>
 
         <div className="flex-1 overflow-hidden flex relative">
+          {pairingTask?.active && (
+            <PairingOverlay 
+              steps={pairingSteps} 
+              onCancel={() => setPairingTask(null)} 
+              error={pairingTask.error}
+            />
+          )}
+
           <DiscoveryGrid 
             searchTerm={searchTerm} 
             onConnect={handleConnect} 

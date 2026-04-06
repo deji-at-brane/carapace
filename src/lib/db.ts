@@ -101,6 +101,15 @@ export class CarapaceDB {
     return id;
   }
 
+  async saveCredential(host: string, token: string, type: string = "api_token") {
+    const id = crypto.randomUUID();
+    await this.execute(
+      "INSERT INTO credentials (id, host, token_type, credential_value) VALUES (?, ?, ?, ?) ON CONFLICT(host) DO UPDATE SET credential_value = excluded.credential_value",
+      [id, host, type, token]
+    );
+    return id;
+  }
+
   async execute(query: string, values?: any[]) {
     return this.db?.execute(query, values);
   }

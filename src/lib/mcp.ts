@@ -208,6 +208,84 @@ export class MCPClient {
 }
 
 /**
+ * OpenClaw Gateway Pairing Manager
+ */
+export class ClawPairingManager {
+  static async initiate(gatewayUrl: string, bootstrapToken: string) {
+    // 1. Try REST Handshake (as per PRD)
+    try {
+      const restUrl = gatewayUrl.startsWith("http") ? gatewayUrl : `http://${gatewayUrl}`;
+      const response = await fetch(`${restUrl}/api/v1/devices/pair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: bootstrapToken }),
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+    } catch (e) {
+      console.warn("REST pairing failed, falling back to WebSocket...", e);
+    }
+
+    // 2. Fallback to WebSocket Handshake (Unified Protocol)
+    return new Promise((resolve, reject) => {
+      const wsUrl = gatewayUrl.replace(/^http/, 'ws').replace(/^claw/, 'ws');
+      const socket = new WebSocket(wsUrl.includes("://") ? wsUrl : `ws://${wsUrl}`);
+      
+      const timeout = setTimeout(() => {
+        socket.close();
+        reject(new Error("Pairing handshake timed out."));
+      }, 10000);
+
+      socket.onopen = () => {
+        // Send Triple-Match handshake for maximum compatibility
+        const payload = { token: bootstrapToken };
+        
+        // 1. Standard MCP/JSON-RPC (PRD)
+        socket.send(JSON.stringify({ method: "devices/pair", params: payload }));
+        
+        // 2. Legacy OpenClaw "Action" 
+        socket.send(JSON.stringify({ action: "pair", payload }));
+        
+        // 3. Modern "Event-Type" 
+        socket.send(JSON.stringify({ type: "pairing_request", ...payload }));
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          // Detect any valid approved signal
+          if (data.statusUrl || data.api_token || data.deviceId || data.result?.api_token) {
+            clearTimeout(timeout);
+            const token = data.api_token || data.result?.api_token;
+            resolve({ ...data, api_token: token, gatewayUrl: gatewayUrl });
+            socket.close();
+          }
+        } catch (e) {
+          console.warn("Received non-JSON message during pairing:", event.data);
+        }
+      };
+
+      socket.onerror = (err) => {
+        clearTimeout(timeout);
+        reject(new Error("WebSocket pairing failed (Connection Refused)."));
+      };
+
+      socket.onclose = () => {
+        clearTimeout(timeout);
+      };
+    });
+  }
+
+  static async pollStatus(statusUrl: string): Promise<{ status: string; api_token?: string }> {
+    const response = await fetch(statusUrl);
+    if (!response.ok) throw new Error("Status check failed");
+    return await response.json();
+  }
+}
+
+/**
  * Transport Factory Helper
  */
 export function createTransport(uri: string): Transport {
@@ -223,7 +301,7 @@ export function createTransport(uri: string): Transport {
 }
 
 /**
- * URI Parser for agent://
+ * URI Parser for agent:// and claw://
  */
 export function parseAgentUri(uri: string) {
   try {
@@ -233,6 +311,8 @@ export function parseAgentUri(uri: string) {
       port: url.port,
       path: url.pathname,
       protocol: url.protocol,
+      token: url.searchParams.get("token"),
+      url: url.toString()
     };
   } catch (e) {
     return null;
