@@ -2,6 +2,7 @@
  * Carapace MCP Protocol Implementation
  * Following MCP v1.0.0 (JSON-RPC 2.0)
  */
+import { invoke } from "@tauri-apps/api/core";
 // import { Child, Command } from "@tauri-apps/plugin-shell";
 
 export interface MCPTool {
@@ -207,75 +208,71 @@ export class MCPClient {
   }
 }
 
+import { IdentityManager } from './crypto';
+
 /**
- * OpenClaw Gateway Pairing Manager
+ * Hermes / OpenClaw Gateway Pairing Manager
  */
 export class ClawPairingManager {
-  static async initiate(gatewayUrl: string, bootstrapToken: string) {
-    // 1. Try REST Handshake (as per PRD)
+  /**
+   * Initiates the native multi-stage handshake via the Rust backend.
+   * This bypasses the browser's forced Origin header.
+   */
+  static async initiate(wsUrl: string, bootstrapToken: string): Promise<any> {
+    console.log("[PROTOCOL] Starting Native Handshake (CORS-free)...");
+    
+    // Determine base URL for credential storage with HTTPS awareness
+    let gatewayBase = wsUrl.replace(/^ws/, 'http').replace(/^claw/, 'http').replace(/^agent/, 'http').replace(/\/$/, '');
+    
+    // Intelligent upgrade to HTTPS for Cloud/Secure Gateways
+    if (gatewayBase.includes(':443') || (gatewayBase.includes('[') && !gatewayBase.includes(':'))) {
+      gatewayBase = gatewayBase.replace('http:', 'https:');
+    }
+    
+    const finalGateway = gatewayBase.startsWith('http') ? gatewayBase : `https://${gatewayBase}`;
+
     try {
-      const restUrl = gatewayUrl.startsWith("http") ? gatewayUrl : `http://${gatewayUrl}`;
-      const response = await fetch(`${restUrl}/api/v1/devices/pair`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: bootstrapToken }),
+      const identity = IdentityManager.getIdentity();
+      
+      // Phase 1 + 2: Native Handshake (Now includes HTTP registration in Rust)
+      console.log("[NATIVE] Initiating secure pairing via Rust backend...");
+      const challenge: { nonce: string; ts: number } = await invoke("mcp_start_pairing", {
+        url: wsUrl,
+        bootstrapToken: bootstrapToken,
+        deviceId: identity.deviceId,
+        deviceName: "Carapace Terminal"
       });
 
-      if (response.ok) {
-        return await response.json();
-      }
-    } catch (e) {
-      console.warn("REST pairing failed, falling back to WebSocket...", e);
-    }
-
-    // 2. Fallback to WebSocket Handshake (Unified Protocol)
-    return new Promise((resolve, reject) => {
-      const wsUrl = gatewayUrl.replace(/^http/, 'ws').replace(/^claw/, 'ws');
-      const socket = new WebSocket(wsUrl.includes("://") ? wsUrl : `ws://${wsUrl}`);
+      console.log("[TRANSPORT] Challenge received via Rust. Stage 2: Generating proof.");
       
-      const timeout = setTimeout(() => {
-        socket.close();
-        reject(new Error("Pairing handshake timed out."));
-      }, 10000);
+      // Sign the challenge using the persistent Device Identity (Now ASYNC)
+      const identityProof = await IdentityManager.signChallenge(challenge.nonce, challenge.ts, bootstrapToken);
 
-      socket.onopen = () => {
-        // Send Triple-Match handshake for maximum compatibility
-        const payload = { token: bootstrapToken };
-        
-        // 1. Standard MCP/JSON-RPC (PRD)
-        socket.send(JSON.stringify({ method: "devices/pair", params: payload }));
-        
-        // 2. Legacy OpenClaw "Action" 
-        socket.send(JSON.stringify({ action: "pair", payload }));
-        
-        // 3. Modern "Event-Type" 
-        socket.send(JSON.stringify({ type: "pairing_request", ...payload }));
-      };
+      // Stage 2: Send identity proof, auth token, and complete pairing
+      console.log("[NATIVE] Completing handshake with signed identity Proof.");
+      const resultJson: string = await invoke("mcp_finish_pairing", {
+        deviceIdentity: identityProof,
+        bootstrapToken: bootstrapToken
+      });
 
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          // Detect any valid approved signal
-          if (data.statusUrl || data.api_token || data.deviceId || data.result?.api_token) {
-            clearTimeout(timeout);
-            const token = data.api_token || data.result?.api_token;
-            resolve({ ...data, api_token: token, gatewayUrl: gatewayUrl });
-            socket.close();
-          }
-        } catch (e) {
-          console.warn("Received non-JSON message during pairing:", event.data);
-        }
-      };
+      console.log("[NATIVE] Final Pairing Result: " + resultJson);
+      
+      // Parse the final result to extract the permanent session token
+      const authResult = JSON.parse(resultJson);
+      if (!authResult.ok) {
+        throw new Error(authResult.error?.message || "Pairing failed");
+      }
 
-      socket.onerror = (err) => {
-        clearTimeout(timeout);
-        reject(new Error("WebSocket pairing failed (Connection Refused)."));
-      };
-
-      socket.onclose = () => {
-        clearTimeout(timeout);
-      };
-    });
+      const sessionToken = authResult.payload?.api_token || authResult.payload?.token || bootstrapToken;
+      
+      return {
+        api_token: sessionToken,
+        gatewayUrl: finalGateway
+      }; 
+    } catch (error) {
+      console.error("[PROTOCOL ERROR] Handshake failed:", error);
+      throw error;
+    }
   }
 
   static async pollStatus(statusUrl: string): Promise<{ status: string; api_token?: string }> {
@@ -296,6 +293,11 @@ export function createTransport(uri: string): Transport {
   if (url.protocol === "http:" || url.protocol === "https:") {
     return new SSETransport(uri);
   }
+  if (url.protocol === "claw:" || url.protocol === "agent:") {
+    // Protocol normalization for WebSocket transport
+    const wsUri = uri.replace(/^(claw|agent):/, "ws:");
+    return new WebSocketTransport(wsUri);
+  }
   // Default to WS for MVP, add Stdio/SSE as needed
   throw new Error(`Unsupported transport protocol: ${url.protocol}`);
 }
@@ -307,7 +309,7 @@ export function parseAgentUri(uri: string) {
   try {
     const url = new URL(uri);
     return {
-      host: url.hostname,
+      host: url.host, // Using url.host to include the port automatically
       port: url.port,
       path: url.pathname,
       protocol: url.protocol,
