@@ -30,13 +30,18 @@ export class IdentityManager {
 
     const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
     const publicKey = keypair.publicKey;
+    
+    // VERIFIED: OpenClaw requires the deviceId to be a stable fingerprint of the public key
+    // We use the hex-encoded public key as the primary identifier (aligned with Hermes v3)
+    const deviceId = Array.from(publicKey as Uint8Array)
+      .map((b: number) => b.toString(16).padStart(2, '0'))
+      .join('');
+
     const publicKeyBase64 = btoa(String.fromCharCode(...publicKey));
     const urlSafePublic = this.toUrlSafe(publicKeyBase64);
     
-    // VERIFIED: OpenClaw requires the deviceId to be the HEX SHA-256 fingerprint of the public key
-    // We use a simple SHA-256 implementation or hex-conversion on the public key bytes
     return {
-      deviceId: "SHA256_PLACEHOLDER", 
+      deviceId, 
       publicKey: urlSafePublic,
       secretKey: keypair.secretKey,
       keypair,

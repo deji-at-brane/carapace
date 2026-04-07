@@ -94,14 +94,26 @@ async fn mcp_start_pairing(
 
         println!("[NATIVE] PROBING: {}", current_url);
         
-        let handshake_future = tokio_tungstenite::connect_async_tls_with_config(&current_url, None, false, Some(stream_config.clone()));
+        let request = http::Request::builder()
+            .uri(&current_url)
+            .header("Sec-WebSocket-Protocol", "mcp")
+            .header("User-Agent", "CarapaceTerminal-v0.1.0")
+            .body(())
+            .map_err(|e: http::Error| e.to_string())?;
+
+        let handshake_future = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(stream_config.clone()));
         match tokio::time::timeout(std::time::Duration::from_secs(15), handshake_future).await {
-            Ok(Ok((mut socket, _))) => {
-                println!("[NATIVE SUCCESS] Connected to {}. Waiting for challenge...", current_url);
+            Ok(Ok((mut socket, response))) => {
+                let subprotocol = response.headers()
+                    .get("sec-websocket-protocol")
+                    .and_then(|v: &http::HeaderValue| v.to_str().ok())
+                    .unwrap_or("none");
+                
+                println!("[NATIVE SUCCESS] Connected to {} (subprotocol: {}). Waiting for challenge...", current_url, subprotocol);
                 
                 match tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                    while let Some(Ok(msg)) = socket.next().await {
-                        if let Message::Text(text) = msg {
+                    while let Some(msg_result) = socket.next().await {
+                        if let Ok(Message::Text(text)) = msg_result {
                             let data: serde_json::Value = serde_json::from_str(&text).ok()?;
                             if data["type"] == "event" && data["event"] == "connect.challenge" {
                                 return Some(data);
@@ -172,12 +184,12 @@ async fn mcp_finish_pairing(
         "id": "pairing-final"
     });
 
-    socket.send(Message::Text(connect_frame.to_string())).await.map_err(|e| e.to_string())?;
+    socket.send(Message::Text(connect_frame.to_string())).await.map_err(|e: tokio_tungstenite::tungstenite::Error| e.to_string())?;
 
     // Wait for result
-    while let Some(Ok(msg)) = socket.next().await {
-        if let Message::Text(text) = msg {
-            let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    while let Some(msg_result) = socket.next().await {
+        if let Ok(Message::Text(text)) = msg_result {
+            let data: serde_json::Value = serde_json::from_str(&text).map_err(|e: serde_json::Error| e.to_string())?;
             
             if data["id"] == "pairing-final" {
                 if data["ok"] == true {
