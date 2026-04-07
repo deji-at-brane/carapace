@@ -5,13 +5,14 @@
   "identifier": "io.carapace.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1425",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Carapace: Universal Agent Terminal",
         "width": 1000,
         "height": 750,
