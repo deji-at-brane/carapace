@@ -1,0 +1,2 @@
+{"type":"event","event":"connect.challenge","payload":{"nonce":"6cc9ec3d-75a1-441d-976b-9a97d20b0c4b","ts":1775622734031}}
+{"type":"res","id":"pairing-test","ok":false,"error":{"code":"INVALID_REQUEST","message":"invalid connect params: at /client/id: must be equal to constant; at /client/id: must match a schema in anyOf"}}

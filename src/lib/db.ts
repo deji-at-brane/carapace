@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { Agent } from "./types";
 
 /**
  * Carapace Database Manager
@@ -64,12 +65,9 @@ export class CarapaceDB {
   }
 
   private async seedAgents() {
-    const existing = await this.select("SELECT COUNT(*) as count FROM agents");
-    // @ts-ignore
-    if (existing[0]?.count > 0) return;
-
     console.log("Seeding discovery hub with default agents...");
     const defaultAgents = [
+      { id: "alex-1", name: "Alex the Operator", description: "Operational gateway for OpenClaw at 148.230.87.184", uri: "claw://148.230.87.184:18789", category: "Production", icon: "ShieldCheck" },
       { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "agent://research.carapace.io", category: "Research", icon: "Compass" },
       { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "agent://code.carapace.io", category: "Development", icon: "Terminal" },
       { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "agent://analysis.carapace.io", category: "Analysis", icon: "LayoutGrid" }
@@ -77,7 +75,7 @@ export class CarapaceDB {
 
     for (const agent of defaultAgents) {
       await this.execute(
-        "INSERT INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?)",
+        "REPLACE INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?)",
         [agent.id, agent.name, agent.description, agent.uri, agent.category, agent.icon]
       );
     }
@@ -103,11 +101,39 @@ export class CarapaceDB {
 
   async saveCredential(host: string, token: string, type: string = "api_token") {
     const id = crypto.randomUUID();
+    // Fixed: column names now match the CREATE TABLE schema (agent_host, key_type, secret_blob)
     await this.execute(
-      "INSERT INTO credentials (id, host, token_type, credential_value) VALUES (?, ?, ?, ?) ON CONFLICT(host) DO UPDATE SET credential_value = excluded.credential_value",
+      "INSERT INTO credentials (id, agent_host, key_type, secret_blob) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET secret_blob = excluded.secret_blob",
       [id, host, type, token]
     );
     return id;
+  }
+
+  async deleteCredential(host: string) {
+    // Normalize host to ensure we match the stored format
+    const normalized = host.replace("claw://", "").replace("agent://", "").split("?")[0].split("/")[0];
+    await this.execute(
+      "DELETE FROM credentials WHERE agent_host LIKE ?",
+      [`%${normalized}%`]
+    );
+  }
+
+  async upsertAgent(agent: Omit<Agent, "created_at">) {
+    await this.execute(
+      "INSERT INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uri) DO UPDATE SET name = excluded.name, description = excluded.description",
+      [agent.id, agent.name, agent.description, agent.uri, agent.category, agent.icon_name]
+    );
+  }
+
+  async getAgentsWithStatus() {
+    // We join agents with credentials based on the host part of the URI
+    // This allows the UI to know which agents are already "Known" and "Paired"
+    const query = `
+      SELECT a.*, (SELECT COUNT(*) FROM credentials WHERE agent_host LIKE '%' || REPLACE(REPLACE(a.uri, 'claw://', ''), 'agent://', '') || '%') as is_paired
+      FROM agents a
+      ORDER BY a.created_at DESC
+    `;
+    return this.select<any[]>(query);
   }
 
   async execute(query: string, values?: any[]) {

@@ -4,18 +4,13 @@ import {
   Compass, 
   Cpu, 
   Activity,
-  Zap
+  Zap,
+  ChevronRight,
+  ShieldCheck
 } from "lucide-react";
+import { Agent } from "@/lib/types";
 
-export interface Agent {
-  id: string;
-  name: string;
-  description: string;
-  uri: string;
-  category: string;
-  icon_name: string;
-  is_pinned?: boolean;
-}
+export type { Agent };
 
 const iconMap: Record<string, any> = {
   LayoutGrid,
@@ -23,7 +18,8 @@ const iconMap: Record<string, any> = {
   Compass,
   Cpu,
   Activity,
-  Zap
+  Zap,
+  ShieldCheck
 };
 
 interface AgentCardProps {

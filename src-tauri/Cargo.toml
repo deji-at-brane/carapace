@@ -26,11 +26,9 @@ tauri-plugin-sql = { version = "2.4.0", features = ["sqlite"] }
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-deep-link = "2.4.8"
 tauri-plugin-single-instance = "2.4.1"
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
-native-tls = "0.2.18"
-tokio-native-tls = "0.3.1"
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+# native-tls and tokio-native-tls removed in favor of rustls
 http = "1"
-

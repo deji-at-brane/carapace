@@ -3,14 +3,15 @@ import {
   LayoutGrid, 
   Settings, 
   Search, 
-  Plus, 
-  Terminal as TerminalIcon,
   MessageSquare,
-  Compass
+  Compass,
+  ShieldCheck,
+  Zap
 } from "lucide-react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { DiscoveryGrid } from "@/components/DiscoveryGrid";
-import { Agent } from "@/components/AgentCard";
+import { AgentSidebarList } from "@/components/AgentSidebarList";
+import { Agent } from "@/lib/types";
 import { ToolDrawer } from "@/components/ToolDrawer";
 import { PairingOverlay, PairingStep } from "@/components/PairingOverlay";
 import { TerminalCanvas, TerminalHandle } from "@/components/TerminalCanvas";
@@ -26,52 +27,151 @@ const INITIAL_PAIRING_STEPS: PairingStep[] = [
 ];
 
 function App() {
-  const [showTerminal, setShowTerminal] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [availableTools, setAvailableTools] = useState<MCPTool[]>([]);
   const [currentClient, setCurrentClient] = useState<MCPClient | null>(null);
   const [pairingTask, setPairingTask] = useState<{ active: boolean; error: string | null } | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [customClientId, setCustomClientId] = useState<string>('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [pairingSteps, setPairingSteps] = useState<PairingStep[]>(INITIAL_PAIRING_STEPS);
   const terminalRef = useRef<TerminalHandle>(null);
 
   const handleConnect = async (agent: Agent) => {
-    if (!terminalRef.current) return;
+    setSelectedAgent(agent);
     
-    setShowTerminal(true);
-    terminalRef.current.clear();
-    terminalRef.current.writeln(`\x1b[1;36m[CONNECTING]\x1b[0m Establishing secure channel to ${agent.name}...`);
-    terminalRef.current.writeln(`\x1b[90mTARGET URI: ${agent.uri}\x1b[0m\r\n`);
-
-    try {
-      // 1. Initialize Protocol
-      const transport = createTransport(agent.uri); 
-      const client = new MCPClient(transport, (msg) => {
-        terminalRef.current?.writeln(`\x1b[33m${msg}\x1b[0m`);
-      });
-
-      await client.initialize();
-      setCurrentClient(client);
-
-      // 2. Automated Tool Discovery
-      const tools = await client.listTools();
-      setAvailableTools(tools);
+    // Wait for terminal mount (increased for stability)
+    setTimeout(async () => {
+      if (!terminalRef.current) return;
       
-      // 3. Persist Session
+      terminalRef.current.clear();
+      terminalRef.current.writeln(`\x1b[1;36m[CONNECTING]\x1b[0m Establishing secure channel to ${agent.name}...`);
+      terminalRef.current.writeln(`\x1b[90mTARGET URI: ${agent.uri}\x1b[0m\r\n`);
+      setConnectionError(null);
+
+      // Check if we already have a pairing for this host
       const db = await CarapaceDB.getInstance();
-      const sessionId = await db.createSession(agent.name, agent.uri);
+      const parsed = parseAgentUri(agent.uri);
+      const hostKey = parsed?.normalizedHost || agent.uri;
       
-      terminalRef.current.writeln(`\r\n\x1b[1;32m[SUCCESS]\x1b[0m Handshake complete. Session \x1b[36m${sessionId.substring(0,8)}\x1b[0m active.`);
-      terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
+      // Fuzzy search: Match by hostname/IP even if protocol or port varies
+      const savedCreds = await db.select<any[]>("SELECT secret_blob FROM credentials WHERE agent_host LIKE ?", [`%${hostKey}%`]);
+      let savedToken = savedCreds.length > 0 ? savedCreds[0].secret_blob : null;
 
-    } catch (error) {
-      terminalRef.current.writeln(`\r\n\x1b[1;31m[ERROR]\x1b[0m Handshake failed: ${error}`);
-      terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
-    }
+      console.log(`[AUTH] Vault Search for ${hostKey}:`, savedToken ? "FOUND" : "NOT FOUND");
+      terminalRef.current?.writeln(`\x1b[90m[AUTH] Identity: ${hostKey} [Vault: ${savedToken ? 'OK' : 'EMPTY'}]\x1b[0m`);
+
+      // Automation: If already paired, skip the overlay and connect immediately
+      const isAlreadyPaired = !!savedToken;
+
+      if (isAlreadyPaired) {
+        console.log(`[AUTO] Using existing credentials for ${hostKey}`);
+        terminalRef.current?.writeln(`\x1b[32m[SESSION] Restoring trusted connection to ${agent.name}...\x1b[0m`);
+        setIsConnecting(true);
+      } else {
+        // First Contact Flow: Start the unified pairing process
+        startClawPairing(agent.uri, agent);
+        return;
+      }
+
+      try {
+        // Priority 1: Use token from the URI (One-Click Pairing)
+        const uriToken = parsed?.token || null;
+        
+        // Priority 2: Use token from the Database (Saved Session)
+        const credentials = await db.select<any[]>("SELECT secret_blob FROM credentials WHERE agent_host = ?", [hostKey]);
+        const dbToken = credentials[0]?.secret_blob || null;
+        
+        savedToken = uriToken || dbToken;
+        console.log(`[AUTH] Protocol state for ${hostKey}:`, 
+          uriToken ? "TOKEN FROM URI" : dbToken ? "TOKEN FROM VAULT" : "NO TOKEN FOUND"
+        );
+
+        const transport = createTransport(agent.uri); 
+        const client = new MCPClient(transport, (msg) => {
+          terminalRef.current?.writeln(`\x1b[33m${msg}\x1b[0m`);
+        }, savedToken || undefined);
+
+        await client.initialize();
+        setCurrentClient(client);
+        setIsConnecting(false);
+        
+        // AUTO-SAVE: If this token was from the URI, save it for next time
+        if (uriToken && !dbToken) {
+          console.log(`[AUTH] Auto-saving new token to vault for ${hostKey}`);
+          await db.saveCredential(hostKey, uriToken);
+        }
+
+        const tools = await client.listTools();
+        setAvailableTools(tools);
+        
+        terminalRef.current.writeln(`\x1b[90m[DISCOVERY]\x1b[0m Identified \x1b[1m${tools.length}\x1b[0m autonomous tools.`);
+        
+        await db.createSession(agent.name, agent.uri);
+        
+        terminalRef.current.writeln(`\r\n\x1b[1;32m[SUCCESS]\x1b[0m Handshake complete. Session active.`);
+        terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
+
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : "Handshake timed out or failed.";
+        setConnectionError(errorMsg);
+        
+        const isPairingId = errorMsg.startsWith("PAIRING_REQUIRED:");
+
+        // AUTO-INVALIDATION: If the token is dead, purge it so the user can re-pair easily
+        if (errorMsg.toLowerCase().includes("expired") || errorMsg.toLowerCase().includes("unauthorized") || errorMsg.toLowerCase().includes("invalid token")) {
+          terminalRef.current?.writeln(`\r\n\x1b[1;33m[CLEANUP]\x1b[0m Expired token detected. Removing from local vault...`);
+          await db.deleteCredential(agent.uri);
+          
+          if (selectedAgent && selectedAgent.id === agent.id) {
+            setSelectedAgent({ ...agent, is_paired: 0 } as any);
+          }
+        }
+        
+        // We set isConnecting to false only after a delay so the user can see the red error bar
+        // BUT: If it's a PAIRING_REQUIRED ID, we keep it active indefinitely so the user can provide the ID to Alex.
+        if (!isPairingId) {
+          setTimeout(() => {
+            setIsConnecting(false);
+          }, 5000);
+        }
+
+        terminalRef.current.writeln(`\r\n\x1b[1;31m[ERROR]\x1b[0m ${errorMsg}`);
+        
+        if (isPairingId) {
+           terminalRef.current.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m Gateway requires manual approval.`);
+           terminalRef.current.writeln(`\x1b[1;36mGive this ID to Alex:\x1b[0m ${errorMsg.split(':')[1]}`);
+        } else if (errorMsg.includes("No session token found") || !savedToken) {
+           terminalRef.current.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m This agent requires a valid authentication token.`);
+           terminalRef.current.writeln(`\x1b[90mSuggestion: Paste the full claw://... URI (with ?token=) into the search bar to re-pair.\x1b[0m`);
+        } else {
+           terminalRef.current.writeln(`\x1b[90m[DIAGNOSTIC] Protocol version mismatch or gateway timeout.\x1b[0m`);
+        }
+        terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
+      }
+    }, 100);
   };
 
   const handleDirectConnect = () => {
     if (!searchTerm.trim()) return;
     
+    // Handle Base64 Setup Code (v3)
+    if (searchTerm.startsWith("ey")) {
+      try {
+        const decoded = JSON.parse(atob(searchTerm.trim()));
+        if (decoded.url && decoded.bootstrapToken) {
+          const fakeUri = `claw://${decoded.url.replace(/^wss?:\/\//, '')}?token=${decoded.bootstrapToken}`;
+          startClawPairing(fakeUri);
+          setSearchTerm("");
+          return;
+        }
+      } catch (e) {
+        console.warn("Input looks like Base64 but failed to decode as OpenClaw Setup Code:", e);
+      }
+    }
+
     if (searchTerm.startsWith("claw://")) {
       startClawPairing(searchTerm.trim());
       setSearchTerm("");
@@ -91,35 +191,106 @@ function App() {
     }
   };
 
-  const startClawPairing = async (uri: string) => {
-    const parsed = parseAgentUri(uri);
-    if (!parsed || !parsed.token) return;
+  const startClawPairing = async (uri: string, existingAgent?: Agent) => {
+    let targetUri = uri.trim();
+    
+    // AUTO-DECODE: Handle raw Base64 Setup Codes (starting with {)
+    if (targetUri.startsWith("eyJ")) {
+      try {
+        const decoded = JSON.parse(atob(targetUri));
+        if (decoded.url && decoded.bootstrapToken) {
+          targetUri = `claw://${decoded.url.replace(/^wss?:\/\//, "")}?token=${decoded.bootstrapToken}`;
+          console.log("[AUTH] Decoded Base64 Setup Code to:", targetUri);
+        }
+      } catch (e) {
+        console.warn("[AUTH] Input looks like Base64 but failed to decode:", e);
+      }
+    }
+
+    const parsed = parseAgentUri(targetUri);
+    if (!parsed || !parsed.token) {
+      terminalRef.current?.writeln(`\r\n\x1b[1;31m[ERROR]\x1b[0m Cannot initiate pairing: No setup token found in URI.`);
+      terminalRef.current?.writeln(`Suggestion: Paste a fresh claw://... URI (e.g. from Alex) that includes the ?token= parameter.`);
+      return;
+    }
 
     setPairingTask({ active: true, error: null });
     setPairingSteps(INITIAL_PAIRING_STEPS.map((s, i) => i === 0 ? { ...s, status: "active" } : s));
 
     try {
-      // Step 1: Initiate Handshake
-      const result = await ClawPairingManager.initiate(parsed.host, parsed.token);
-      const { statusUrl, api_token, gatewayUrl } = result;
-      
-      setPairingSteps(prev => prev.map(s => s.id === "handshake" ? { ...s, status: "complete" } : s.id === "approval" ? { ...s, status: "active" } : s));
+      // Hook into the Discovery Loop to show real-time progress
+      (ClawPairingManager as any).setHandshakePulse((msg: string) => {
+        terminalRef.current?.writeln(`\x1b[90m${msg}\x1b[0m`);
+        // If the message contains [APPROVAL], it means we found the right preset
+        if (msg.includes("[CHALLENGE]")) {
+           setPairingSteps(prev => prev.map(s => s.id === "handshake" ? { ...s, status: "complete" } : s.id === "approval" ? { ...s, status: "active" } : s));
+        }
+      });
 
-      // Handle immediate approval (WebSocket flow)
-      if (api_token) {
+      terminalRef.current?.writeln(`\x1b[90m[HANDSHAKE] PROBE TARGET: ${parsed.host}\x1b[0m`);
+      const result = await ClawPairingManager.initiate(parsed.host, parsed.token, customClientId || undefined);
+      
+      const data = typeof result === 'string' ? JSON.parse(result) : result;
+      const { statusUrl, api_token, gatewayUrl, requestId } = data;
+      const successData = data.result || {};
+      const agentName = successData.agentName || "OpenClaw Agent";
+
+      if (statusUrl === "manual_approval" && requestId) {
+         terminalRef.current?.writeln(`\x1b[1;33m[WAITING]\x1b[0m Discovery Succeeded. Gateway is awaiting Manual Approval.`);
+         terminalRef.current?.writeln(`\x1b[90mOperator (Alex) must approve Request ID: ${requestId}\x1b[0m`);
+         
+         // Auto-Register the agent in the sidebar even during pending approval
+         const db = await CarapaceDB.getInstance();
+         await db.upsertAgent({
+           id: existingAgent?.id || crypto.randomUUID(),
+           name: agentName || existingAgent?.name || "OpenClaw Agent",
+           description: existingAgent?.description || `Awaiting approval at ${parsed.host}`,
+           uri: uri,
+           category: "Production",
+           icon_name: "Timer"
+         });
+
+         setPairingTask({ 
+            active: true, 
+            error: `PENDING: Handshake sequence accepted.\n\nOperator identity (Alex) has approved this device's Request ID: (${requestId}).\n\nFINAL STEP: Please PASTE THE SETUP CODE ONE MORE TIME into the search bar to finalize the session and receive your persistent token!`
+         });
+         return;
+      }
+
+      if (api_token || successData.token) {
+        terminalRef.current?.writeln(`\x1b[1;32m[SUCCESS]\x1b[0m Protocol established. Handshake confirmed.`);
+        const final_token = api_token || successData.token;
+        const normalized_gateway = parsed.normalizedHost || gatewayUrl || parsed.host;
+
         setPairingSteps(prev => prev.map(s => s.id === "approval" ? { ...s, status: "complete" } : s.id === "finalize" ? { ...s, status: "active" } : s));
         const db = await CarapaceDB.getInstance();
-        await db.saveCredential(gatewayUrl || parsed.host, api_token);
+        await db.saveCredential(normalized_gateway, final_token);
+        terminalRef.current?.writeln(`\x1b[90m[AUTH] Credentials bonded for: ${normalized_gateway}\x1b[0m`);
+        
+        // Auto-Register the new agent in the sidebar
+        const newAgent = {
+          id: existingAgent?.id || crypto.randomUUID(),
+          name: agentName || existingAgent?.name || "OpenClaw Agent",
+          description: existingAgent?.description || `Paired session at ${normalized_gateway}`,
+          uri: existingAgent?.uri || uri, 
+          category: existingAgent?.category || "Production",
+          icon_name: existingAgent?.icon_name || "ShieldCheck"
+        };
+        await db.upsertAgent(newAgent);
+
         setPairingSteps(prev => prev.map(s => ({ ...s, status: "complete" })));
-        setTimeout(() => setPairingTask(null), 1500);
+        setTimeout(() => {
+          setPairingTask(null);
+          // Auto-Connect now that we are paired (use newAgent if existing was null)
+          handleConnect(newAgent as Agent);
+        }, 1500);
         return;
       }
 
-      // Step 2: Poll for Approval (REST flow)
       let attempts = 0;
       const checkAndPoll = async () => {
         if (!statusUrl) throw new Error("No status URL provided by gateway.");
-        if (attempts > 40) throw new Error("Pairing timed out. Please try again.");
+        if (attempts > 60) throw new Error("Pairing timed out after 3 minutes. Please check your agent's logs.");
         attempts++;
         
         const pollResult = await ClawPairingManager.pollStatus(statusUrl);
@@ -129,8 +300,21 @@ function App() {
           const db = await CarapaceDB.getInstance();
           await db.saveCredential(gatewayUrl || parsed.host, pollResult.api_token);
           
+          await db.upsertAgent({
+            id: existingAgent?.id || crypto.randomUUID(),
+            name: agentName || existingAgent?.name || "OpenClaw Agent",
+            description: existingAgent?.description || `Paired session at ${gatewayUrl || parsed.host}`,
+            uri: existingAgent?.uri || uri,
+            category: existingAgent?.category || "Production",
+            icon_name: existingAgent?.icon_name || "ShieldCheck"
+          });
+
           setPairingSteps(prev => prev.map(s => ({ ...s, status: "complete" })));
-          setTimeout(() => setPairingTask(null), 1500);
+          setTimeout(() => {
+            setPairingTask(null);
+            // Auto-Connect now that we are paired
+            if (existingAgent) handleConnect(existingAgent);
+          }, 1500);
         } else {
           setTimeout(checkAndPoll, 3000);
         }
@@ -155,9 +339,12 @@ function App() {
         if (c.text) terminalRef.current?.writeln(c.text);
       });
       terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
-    } catch (error) {
-      terminalRef.current.writeln(`\x1b[1;31m[ERROR]\x1b[0m Tool execution failed: ${error}`);
-      terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
+    } catch (e: any) {
+      terminalRef.current?.writeln(`\x1b[31m[ERROR] Handshake Failed: ${e.message || e}\x1b[0m`);
+      terminalRef.current?.writeln(`\x1b[33m[ACTION REQUIRED] This agent requires a valid authentication token.\x1b[0m`);
+      terminalRef.current?.writeln(`Suggestion: Paste the full claw://... URI (with ?token=) into the search bar to re-pair.`);
+      setPairingTask(null);
+      setCurrentClient(null);
     }
   };
 
@@ -165,10 +352,19 @@ function App() {
     let unlisten: (() => void) | undefined;
 
     const setupDeepLink = async () => {
+      // ONE-TIME PURGE: Clean up any corrupted 'localhost' state from previous failed attempts
+      try {
+        const db = await CarapaceDB.getInstance();
+        await db.execute("DELETE FROM agents WHERE uri LIKE '%localhost%' OR uri LIKE '%127.0.0.1%'");
+        await db.execute("DELETE FROM credentials WHERE agent_host LIKE '%localhost%' OR agent_host LIKE '%127.0.0.1%'");
+        console.log("[STORAGE] Purged stale localhost sessions.");
+      } catch (e) {
+        console.warn("[STORAGE] Purge failed (likely fresh install):", e);
+      }
+
       try {
         unlisten = await onOpenUrl((urls) => {
           console.log("Deep link received:", urls);
-          // TODO: Implement actual session routing
         });
       } catch (error) {
         console.error("Failed to initialize deep link listener:", error);
@@ -182,32 +378,28 @@ function App() {
     };
   }, []);
 
+  const [modalToken, setModalToken] = useState("");
+
   return (
     <div className="flex h-screen w-full bg-[#0a0a09] text-[#e0e0d0] overflow-hidden font-sans antialiased selection:bg-primary/30">
-      {/* Sidebar: Pro Navigation */}
+      {/* Sidebar: Navigation */}
       <aside className="w-16 flex flex-col items-center py-6 border-r border-[#2a2a24]/50 bg-[#0f0f0d] z-20 shadow-[-10px_0_30px_rgba(0,0,0,0.5)]">
-        <div className="p-3 mb-10 bg-primary/15 rounded-2xl text-primary border border-primary/25 shadow-[0_0_20px_rgba(var(--primary),0.1)]">
+        <div 
+          onClick={() => setSelectedAgent(null)}
+          className="p-3 mb-10 bg-primary/15 rounded-2xl text-primary border border-primary/25 shadow-[0_0_20px_rgba(var(--primary),0.1)] cursor-pointer hover:bg-primary/25 transition-all"
+        >
           <LayoutGrid size={24} strokeWidth={2.5} />
         </div>
         
         <nav className="flex-1 flex flex-col gap-5">
-          <button className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group">
+          <button 
+            onClick={() => setSelectedAgent(null)}
+            className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group"
+          >
             <Compass size={22} className="group-hover:scale-110 transition-transform" />
           </button>
           <button className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group">
             <MessageSquare size={22} className="group-hover:scale-110 transition-transform" />
-          </button>
-          <button 
-            onClick={() => setShowTerminal(!showTerminal)}
-            className={cn(
-              "p-3.5 rounded-2xl transition-all duration-500 relative",
-              showTerminal 
-                ? "bg-primary text-primary-foreground shadow-[0_0_25px_rgba(var(--primary),0.3)]" 
-                : "hover:bg-[#1a1a17] text-[#7a7a6a] hover:text-[#e0e0d0]"
-            )}
-          >
-            <TerminalIcon size={22} />
-            {showTerminal && <span className="absolute -right-1 -top-1 w-2.5 h-2.5 bg-white rounded-full animate-pulse blur-[1px]"></span>}
           </button>
         </nav>
 
@@ -218,25 +410,60 @@ function App() {
         </div>
       </aside>
 
-      {/* Main Orchestration Canvas */}
+      {/* Agent Selection Sidebar (Telegram Style) */}
+      <AgentSidebarList 
+        searchTerm={searchTerm}
+        selectedAgentId={selectedAgent?.id}
+        onSelect={handleConnect}
+      />
+
+      {/* Main Multi-Stage Hub */}
       <main className="flex-1 flex flex-col min-w-0 bg-[#0a0a09] relative shadow-2xl">
         <header className="h-16 border-b border-[#2a2a24]/50 flex items-center px-6 justify-between bg-[#0f0f0d]/80 backdrop-blur-xl sticky top-0 z-10">
           <div className="flex items-center gap-3">
             <div className="flex bg-[#1a1a17] rounded-xl p-1 shadow-inner">
-              <button className="px-4 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg bg-[#2a2a24] text-white shadow-xl transition-all">Main</button>
-              <button className="p-2 text-[#7a7a6a] hover:text-white transition-colors"><Plus size={14} /></button>
+              <button className="px-4 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg bg-[#2a2a24] text-white shadow-xl transition-all">
+                {selectedAgent ? selectedAgent.name : "Discovery Hub"}
+              </button>
             </div>
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Global Identity Proxy Toggle */}
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className={cn(
+                  "p-2 rounded-xl border transition-all duration-300 group relative",
+                  showAdvanced ? "bg-primary/20 border-primary/40 text-primary shadow-[0_0_15px_rgba(var(--primary),0.2)]" : "bg-[#1a1a17] border-[#2a2a24] text-[#4a4a40] hover:text-[#7a7a6a]"
+                )}
+                title="Proxy Identity Override"
+              >
+                <ShieldCheck size={18} />
+                {customClientId && <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-primary rounded-full border-2 border-[#0f0f0d] shadow-sm animate-pulse"></div>}
+              </button>
+
+              {showAdvanced && (
+                <div className="w-48 animate-in slide-in-from-right-4 fade-in duration-500">
+                  <input 
+                    type="text" 
+                    placeholder="Client ID Mask..." 
+                    value={customClientId}
+                    onChange={(e) => setCustomClientId(e.target.value)}
+                    className="w-full bg-[#1a1a17] border border-primary/20 rounded-xl px-3 py-1.5 text-[10px] text-white placeholder:text-white/10 outline-none focus:border-primary font-mono transition-all"
+                  />
+                </div>
+              )}
+            </div>
+
             <div className="relative group">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#7a7a6a] group-focus-within:text-primary transition-colors" size={16} />
               <input 
-                placeholder="agent://discover or https://..." 
+                placeholder="Search or agent:// ..." 
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleDirectConnect()}
-                className="bg-[#1a1a17] border border-[#2a2a24] rounded-xl pl-10 pr-4 py-2 text-sm w-72 focus:w-96 transition-all duration-500 focus:bg-black focus:ring-1 focus:ring-primary/50 outline-none text-[#e0e0d0] placeholder-[#4a4a40]"
+                className="bg-[#1a1a17] border border-[#2a2a24] rounded-xl pl-10 pr-4 py-2 text-sm w-72 focus:w-80 transition-all duration-500 focus:bg-black focus:ring-1 focus:ring-primary/50 outline-none text-[#e0e0d0] placeholder-[#4a4a40]"
               />
             </div>
           </div>
@@ -248,47 +475,134 @@ function App() {
               steps={pairingSteps} 
               onCancel={() => setPairingTask(null)} 
               error={pairingTask.error}
+              customClientId={customClientId}
+              setCustomClientId={setCustomClientId}
+              showAdvanced={showAdvanced}
+              setShowAdvanced={setShowAdvanced}
             />
           )}
 
-          <DiscoveryGrid 
-            searchTerm={searchTerm} 
-            onConnect={handleConnect} 
-          />
-
-          {/* Persistent Terminal Interface */}
-          <div 
-            className={cn(
-              "absolute bottom-0 left-0 right-0 h-64 border-t border-[#2a2a24] bg-black/95 backdrop-blur-2xl transition-all duration-700 ease-in-out z-10 shadow-2xl",
-              showTerminal ? "translate-y-0" : "translate-y-full opacity-0"
-            )}
-          >
-            <div className="h-10 border-b border-[#2a2a24]/50 flex items-center px-5 justify-between text-[10px] font-bold text-[#4a4a40] uppercase tracking-[0.2em]">
-              <span className="flex items-center gap-2 underline decoration-primary underline-offset-4 decoration-2">Agent Console Output</span>
-              <button onClick={() => setShowTerminal(false)} className="hover:text-white transition-colors">[ TERMINATE ]</button>
-            </div>
-            <div className="p-3 h-[calc(100%-2.5rem)]">
-              <TerminalCanvas ref={terminalRef} />
-            </div>
-          </div>
-
-          <aside className="w-80 border-l border-[#2a2a24]/50 bg-[#0f0f0d]/50 backdrop-blur-sm hidden lg:flex flex-col">
-            <ToolDrawer 
-              tools={availableTools} 
-              onInvoke={handleInvokeTool} 
-              isConnected={currentClient !== null} 
+          {!selectedAgent ? (
+            <DiscoveryGrid 
+              searchTerm={searchTerm} 
+              onConnect={handleConnect} 
             />
-          </aside>
+          ) : (
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+              <div className="terminal-header">
+                <div className="agent-info">
+                  <span className="agent-name">{selectedAgent.name}</span>
+                  <span className={`status-dot ${currentClient ? 'online' : 'offline'}`}></span>
+                </div>
+                <div className="terminal-actions">
+                  {/* Action buttons could go here */}
+                </div>
+              </div>
+              
+                {/* PAIRING BANNER */}
+                {selectedAgent && !currentClient && (isConnecting || connectionError?.startsWith("PAIRING_REQUIRED:")) && (
+                  <div className={cn(
+                    "absolute inset-x-0 top-0 z-10 p-2 flex items-center justify-center gap-3 border-b transition-colors duration-500",
+                    connectionError?.startsWith("PAIRING_REQUIRED:")
+                      ? "bg-orange-900/60 border-orange-500/50"
+                      : "bg-blue-900/40 border-blue-500/50"
+                  )}>
+                    <div className={cn(
+                      "w-2 h-2 rounded-full",
+                      connectionError?.startsWith("PAIRING_REQUIRED:") ? "bg-orange-500 animate-pulse" : "bg-blue-500 animate-pulse"
+                    )} />
+                    <span className={cn(
+                      "text-xs font-mono uppercase tracking-widest",
+                      connectionError?.startsWith("PAIRING_REQUIRED:") ? "text-orange-300" : "text-blue-400"
+                    )}>
+                      {connectionError?.startsWith("PAIRING_REQUIRED:") 
+                        ? `APPROVAL PENDING: GIVE ID [ ${connectionError.split(':')[1]} ] TO ALEX`
+                        : "Verifying Identity & Synchronizing Protocol..."
+                      }
+                    </span>
+                  </div>
+                )}
+
+                {selectedAgent && !currentClient && !isConnecting && !pairingTask?.active && !connectionError?.startsWith("PAIRING_REQUIRED:") && (
+                  <div className="absolute inset-0 z-10 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
+                    <div className="max-w-md w-full bg-[#1a1a1a] border border-orange-900/30 rounded-lg p-6 shadow-2xl animate-in fade-in zoom-in duration-300">
+                      <div className="flex items-center gap-4 mb-4">
+                        <div className="p-3 bg-orange-900/20 rounded-full">
+                          <ShieldCheck className="w-8 h-8 text-orange-500" />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-bold">Authentication Required</h2>
+                          <p className="text-gray-400 text-sm">To establish a secure channel to {selectedAgent.name}, you must first pair or connect your local terminal.</p>
+                        </div>
+                      </div>
+                      
+                      {((selectedAgent as any).is_paired > 0 || (selectedAgent as any).is_known) ? (
+                        <div className="space-y-4">
+                          <button 
+                            onClick={() => handleConnect(selectedAgent)}
+                            className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-md transition-all shadow-lg flex items-center justify-center gap-2"
+                          >
+                            <Zap className="w-5 h-5" />
+                            Connect Trusted Session
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="bg-black/40 p-3 rounded-md border border-white/5">
+                            <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Paste Setup Code / URI</label>
+                            <input 
+                              type="text"
+                              value={modalToken}
+                              onChange={(e) => {
+                                setModalToken(e.target.value);
+                                if (connectionError) setConnectionError(null);
+                              }}
+                              placeholder="claw://148.230.87.184:18789?token=..."
+                              className="w-full bg-[#0a0a09] border border-[#2a2a24] rounded px-3 py-2 text-xs font-mono focus:border-orange-500/50 outline-none transition-colors"
+                            />
+                          </div>
+                          <button 
+                            onClick={() => {
+                              const target = modalToken.trim() || selectedAgent.uri;
+                              startClawPairing(target, selectedAgent);
+                              setModalToken("");
+                            }}
+                            className="w-full bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 rounded-md transition-colors shadow-lg flex items-center justify-center gap-2"
+                          >
+                            <Zap className="w-5 h-5" />
+                            Pair New Agent
+                          </button>
+                          <p className="text-[10px] text-center text-gray-600">You can get this code from Alex by asking for a "Setup Code".</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              <div className="terminal-container flex-1 overflow-hidden">
+                <TerminalCanvas ref={terminalRef} />
+              </div>
+              <aside className="w-full border-t border-[#2a2a24]/50 bg-[#0f0f0d]/50 h-48 flex-shrink-0">
+                 <ToolDrawer 
+                  tools={availableTools} 
+                  onInvoke={handleInvokeTool} 
+                  isConnected={currentClient !== null} 
+                />
+              </aside>
+            </div>
+          )}
         </div>
 
         <footer className="h-12 border-t border-[#2a2a24]/50 bg-[#0f0f0d]/90 backdrop-blur-md flex items-center px-6 justify-between text-[10px] font-bold font-mono text-[#4a4a40] z-20">
           <div className="flex gap-6">
-            <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_10px_rgba(var(--primary),1)]"></span> NODE STATUS: ACTIVE</span>
-            <span className="opacity-40">ENV: v0.1.0-alpha</span>
+            <span className="flex items-center gap-2">
+              <span className={cn("h-1.5 w-1.5 rounded-full shadow-[0_0_10px_rgba(var(--primary),1)]", currentClient ? "bg-primary animate-pulse" : "bg-[#2a2a24]")}></span> 
+              STATUS: {currentClient ? "ENCRYPTED" : "LISTENING"}
+            </span>
+            {selectedAgent && <span className="opacity-40 uppercase truncate max-w-40">TARGET: {selectedAgent.uri}</span>}
           </div>
           <div className="flex gap-6">
-            <span className="hover:text-[#7a7a6a] cursor-default transition-colors">VOL: 12.4 MB</span>
-            <span className="hover:text-[#7a7a6a] cursor-default transition-colors">RRT: 14ms</span>
+            <span className="hover:text-[#7a7a6a] cursor-default transition-colors uppercase">Network: v0.1.0-alpha</span>
           </div>
         </footer>
       </main>

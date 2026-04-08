@@ -1,0 +1,6 @@
+[test (Minimalist)] ERROR: device identity mismatch
+[test (Minimalist Macos)] ERROR: device identity mismatch
+[test (Enriched)] ERROR: invalid connect params: at /client: unexpected property 'name'; at /client: unexpected property 'role'; at /client: unexpected property 'platformName'
+[node-host (Minimalist)] ERROR: device identity mismatch
+[node-host (Minimalist Macos)] ERROR: device identity mismatch
+[node-host (Enriched)] ERROR: invalid connect params: at /client: unexpected property 'name'; at /client: unexpected property 'role'; at /client: unexpected property 'platformName'

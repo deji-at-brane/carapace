@@ -1,0 +1,1 @@
+﻿CONNECT RESP: {"type":"res","id":"pairing-final","ok":false,"error":{"code":"INVALID_REQUEST","message":"unauthorized: bootstrap token invalid or expired (scan a fresh setup code)","details":{"code":"AUTH_BOOTSTRAP_TOKEN_INVALID","authReason":"bootstrap_token_invalid","canRetryWithDeviceToken":false,"recommendedNextStep":"review_auth_configuration"}}}

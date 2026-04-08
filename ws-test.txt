@@ -1,0 +1,2 @@
+{"type":"event","event":"connect.challenge","payload":{"nonce":"022a9479-2306-4d4e-8268-c170942c6121","ts":1775622535519}}
+{"type":"res","id":"pairing-test","ok":false,"error":{"code":"INVALID_REQUEST","message":"device identity mismatch","details":{"code":"DEVICE_AUTH_DEVICE_ID_MISMATCH","reason":"device-id-mismatch"}}}

@@ -17,146 +17,83 @@ pub struct HandshakeChallenge {
 
 #[tauri::command]
 async fn mcp_start_pairing(
-    url: String,
-    _bootstrap_token: String,
-    _device_id: String,
-    _device_name: String,
+    gatewayUrl: String,
+    token: String,
+    deviceId: String,
+    deviceName: String,
     state: tauri::State<'_, HandshakeState>,
 ) -> Result<HandshakeChallenge, String> {
-    println!("[NATIVE] Resolving secure route for: {}", url);
+    println!("[NATIVE] Resolving secure route (Rustls) for: {}", gatewayUrl);
 
-    // 1. Determine Initial Target
-    let initial_url = if url.contains("://") { 
-        url.replace("claw://", "ws://").replace("agent://", "ws://")
-    } else { 
-        format!("ws://{}/", url) 
+    // 1. Normalize Host
+    let raw_host = if gatewayUrl.contains("://") {
+        gatewayUrl.split("://").nth(1).unwrap_or("").split('?').next().unwrap_or("")
+    } else {
+        gatewayUrl.split('?').next().unwrap_or("")
     };
-
-    // 2. Discover Best Possible Routes: Seed with high-probability Cloud candidates!
-    let mut probe_urls = Vec::new();
     
-    // a. Always try the user's provided URL first
-    probe_urls.push(initial_url.clone());
-
-    // b. Extract host for secure fallbacks
-    let domain_part = if initial_url.contains("://") {
-        initial_url.split("://").collect::<Vec<&str>>()[1]
+    let is_ip = raw_host.split(':').next().unwrap_or("").chars().all(|c| c.is_numeric() || c == '.');
+    let has_port = raw_host.contains(':');
+    
+    let mut current_url = if gatewayUrl.contains("://") {
+        gatewayUrl.replace("agent://", "wss://").replace("claw://", "ws://")
+    } else if is_ip {
+        if has_port { format!("ws://{}/", gatewayUrl) } else { format!("ws://{}:18789/", gatewayUrl) }
     } else {
-        &initial_url
-    };
-    let host_only = if domain_part.contains(']') && domain_part.contains("]:") {
-         domain_part.split("]:").collect::<Vec<&str>>()[0].to_string() + "]"
-    } else if domain_part.contains(':') && !domain_part.contains(']') {
-         domain_part.split(':').collect::<Vec<&str>>()[0].to_string()
-    } else {
-         domain_part.trim_end_matches('/').to_string()
+        format!("wss://{}/", gatewayUrl)
     };
 
-    // c. Seed with common Cloud Gateway patterns (Port 443 / SSL)
-    if !initial_url.contains(":443") {
-        probe_urls.push(format!("wss://{}:443/", host_only));
-        probe_urls.push(format!("wss://{}:443/vss/", host_only));
-        probe_urls.push(format!("wss://{}:443/vss/ws/", host_only));
+    if !current_url.contains("://") {
+        current_url = format!("ws://{}", current_url);
     }
 
-    // 2. Proactively Follow Redirects (Check for even more hidden paths)
-    let http_url = initial_url.replace("ws://", "http://").replace("wss://", "https://");
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .user_agent("Mozilla/5.0 CarapaceTerminal/1.0")
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    if let Ok(r) = client.get(&http_url).send().await {
-        let terminal_url = r.url().to_string();
-        if terminal_url != http_url {
-            let base = terminal_url.replace("http://", "ws://").replace("https://", "wss://");
-            if !probe_urls.contains(&base) {
-                probe_urls.push(base.clone());
-            }
-        }
-    }
-
-    // 3. Setup Flexible TLS Connector
-    let mut tls_builder = native_tls::TlsConnector::builder();
-    tls_builder.danger_accept_invalid_hostnames(true);
-    let native_tls_connector = tls_builder.build().map_err(|e| e.to_string())?;
-    let stream_config = tokio_tungstenite::Connector::NativeTls(native_tls_connector);
-
+    println!("[NATIVE] PROBING (Rustls): {}", current_url);
     let mut final_error = String::from("No connection reachable");
     
-    // 4. Connect with an aggressive 60-second multi-probe window
-    for mut current_url in probe_urls {
-        if current_url.contains(":443") {
-            current_url = current_url.replace("ws://", "wss://");
-        }
-
-        println!("[NATIVE] PROBING: {}", current_url);
-        
-        let request = http::Request::builder()
-            .uri(&current_url)
-            .header("Sec-WebSocket-Protocol", "mcp")
-            .header("User-Agent", "CarapaceTerminal-v0.1.0")
-            .body(())
-            .map_err(|e: http::Error| e.to_string())?;
-
-        let handshake_future = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(stream_config.clone()));
-        match tokio::time::timeout(std::time::Duration::from_secs(15), handshake_future).await {
-            Ok(Ok((mut socket, response))) => {
-                let subprotocol = response.headers()
-                    .get("sec-websocket-protocol")
-                    .and_then(|v: &http::HeaderValue| v.to_str().ok())
-                    .unwrap_or("none");
-                
-                println!("[NATIVE SUCCESS] Connected to {} (subprotocol: {}). Waiting for challenge...", current_url, subprotocol);
-                
-                match tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                    while let Some(msg_result) = socket.next().await {
-                        if let Ok(Message::Text(text)) = msg_result {
-                            let data: serde_json::Value = serde_json::from_str(&text).ok()?;
-                            if data["type"] == "event" && data["event"] == "connect.challenge" {
-                                return Some(data);
-                            }
+    match connect_async(&current_url).await {
+        Ok((mut socket, _)) => {
+            println!("[NATIVE SUCCESS] Connected to {}. Waiting for challenge...", current_url);
+            
+            match tokio::time::timeout(std::time::Duration::from_secs(45), async {
+                while let Some(Ok(msg)) = socket.next().await {
+                    if let Message::Text(text) = msg {
+                        let data: serde_json::Value = serde_json::from_str(&text).ok()?;
+                        if data["type"] == "event" && data["event"] == "connect.challenge" {
+                            return Some(data);
                         }
                     }
-                    None
-                }).await {
-                    Ok(Some(data)) => {
-                        let payload = &data["payload"];
-                        let challenge = HandshakeChallenge {
-                            nonce: payload["nonce"].as_str().unwrap_or_default().to_string(),
-                            ts: payload["ts"].as_i64().unwrap_or_default(),
-                        };
-                        
-                        let mut lock = state.socket.lock().await;
-                        *lock = Some(socket);
-                        return Ok(challenge);
-                    },
-                    _ => {
-                        println!("[NATIVE] {} quiet (no challenge). Trying next...", current_url);
-                        continue;
-                    }
                 }
-            },
-            Ok(Err(e)) => {
-                println!("[NATIVE] {} failed: {}", current_url, e);
-                final_error = format!("{} failed early: {}", current_url, e);
-            },
-            Err(_) => {
-                println!("[NATIVE] {} timed out. Trying next...", current_url);
-                final_error = format!("{} timed out", current_url);
+                None
+            }).await {
+                Ok(Some(data)) => {
+                    let payload = &data["payload"];
+                    let challenge = HandshakeChallenge {
+                        nonce: payload["nonce"].as_str().unwrap_or_default().to_string(),
+                        ts: payload["ts"].as_i64().unwrap_or_default(),
+                    };
+                    
+                    let mut lock = state.socket.lock().await;
+                    *lock = Some(socket);
+                    return Ok(challenge);
+                },
+                _ => {
+                    final_error = format!("Gateway at {} did not respond with a handshake challenge.", current_url);
+                }
             }
+        },
+        Err(e) => {
+            final_error = format!("{}: {}", current_url, e);
         }
     }
 
-    Err(format!("Pairing failed after deep discovery: {}", final_error))
+    Err(format!("Pairing failed: {}. Ensure your gateway is reachable and SSL cert is valid.", final_error))
 }
 
 #[tauri::command]
 async fn mcp_finish_pairing(
-    device_identity: serde_json::Value,
-    bootstrap_token: String,
+    deviceIdentity: serde_json::Value,
+    clientIdentity: serde_json::Value,
+    bootstrapToken: String,
     state: tauri::State<'_, HandshakeState>,
 ) -> Result<String, String> {
     println!("[NATIVE] Completing Handshake with verified Bootstrap Token...");
@@ -164,59 +101,81 @@ async fn mcp_finish_pairing(
     let mut lock = state.socket.lock().await;
     let mut socket = lock.take().ok_or("No active handshake session")?;
 
-    // FINAL ALIGNED SCHEMA: auth.bootstrapToken (Verified via Fuzzer)
     let connect_frame = serde_json::json!({
         "type": "req",
         "method": "connect",
+        "id": "pairing-final",
         "params": {
             "minProtocol": 3,
             "maxProtocol": 3,
-            "client": { 
-                "id": "openclaw-macos", 
-                "version": "1.0.0", 
-                "platform": "macos", 
-                "mode": "cli",
-                "deviceFamily": "desktop"
-            },
-            "auth": { "bootstrapToken": bootstrap_token },
-            "device": device_identity
-        },
-        "id": "pairing-final"
+            "client": clientIdentity,
+            "auth": { "bootstrapToken": bootstrapToken },
+            "device": deviceIdentity
+        }
     });
 
-    socket.send(Message::Text(connect_frame.to_string())).await.map_err(|e: tokio_tungstenite::tungstenite::Error| e.to_string())?;
+    socket.send(Message::Text(connect_frame.to_string())).await.map_err(|e| e.to_string())?;
 
-    // Wait for result
-    while let Some(msg_result) = socket.next().await {
-        if let Ok(Message::Text(text)) = msg_result {
-            let data: serde_json::Value = serde_json::from_str(&text).map_err(|e: serde_json::Error| e.to_string())?;
-            
-            if data["id"] == "pairing-final" {
-                if data["ok"] == true {
-                    println!("[NATIVE] Pairing SUCCESS!");
-                    return Ok(text);
-                } else {
-                    let err = data["error"]["message"].as_str().unwrap_or("Pairing failed").to_string();
-                    println!("[NATIVE] Pairing ERROR: {}", err);
-                    return Err(err);
+    match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(Ok(msg)) = socket.next().await {
+            if let Message::Text(text) = msg {
+                let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                
+                if data["id"] == "pairing-final" {
+                    if data["ok"] == true {
+                        println!("[NATIVE] Connected successfully!");
+                        return Ok(text);
+                    } else {
+                        let err = data["error"]["message"].as_str().unwrap_or("Pairing failed");
+                        
+                        // Gateway explicitly requesting pairing flow
+                        if err.contains("pairing required") {
+                            if let Some(request_id) = data["error"]["details"]["requestId"].as_str() {
+                                println!("[NATIVE] Gateway expects manual approval. Providing requestId: {}", request_id);
+                                let fake_success = serde_json::json!({
+                                    "ok": true,
+                                    "statusUrl": "manual_approval",
+                                    "requestId": request_id
+                                });
+                                return Ok(fake_success.to_string());
+                            }
+                        }
+
+                        // Return the full payload to the frontend so we can inspect it
+                        return Err(text.clone());
+                    }
+                } else if data["id"] == "pairing-real" {
+                    if data["ok"] == true {
+                        println!("[NATIVE] Pairing SUCCESS! Session bonded.");
+                        return Ok(text);
+                    } else {
+                        let err = data["error"]["message"].as_str().unwrap_or("Pairing rejected");
+                        println!("[GATEWAY RAW ERROR] {}", text);
+                        return Err(err.to_string());
+                    }
                 }
             }
         }
+        Err("Gateway closed connection".to_string())
+    }).await {
+        Ok(res) => res,
+        Err(_) => Err("Gateway timed out after 30 seconds. Try a fresh setup token.".to_string())
     }
-
-    Err("Handshake session closed before completion".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(HandshakeState { socket: Arc::new(Mutex::new(Option::None)) })
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
-        .plugin(tauri_plugin_deep_link::init())
-        .invoke_handler(tauri::generate_handler![mcp_start_pairing, mcp_finish_pairing])
+        .manage(HandshakeState {
+            socket: Arc::new(Mutex::new(None)),
+        })
+        .invoke_handler(tauri::generate_handler![
+            mcp_start_pairing,
+            mcp_finish_pairing
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
