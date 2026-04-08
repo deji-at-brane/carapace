@@ -31,12 +31,13 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [availableTools, setAvailableTools] = useState<MCPTool[]>([]);
   const [currentClient, setCurrentClient] = useState<MCPClient | null>(null);
+  const [pairingSteps, setPairingSteps] = useState<PairingStep[]>(INITIAL_PAIRING_STEPS);
   const [pairingTask, setPairingTask] = useState<{ active: boolean; error: string | null } | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [customClientId, setCustomClientId] = useState<string>('');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [pairingSteps, setPairingSteps] = useState<PairingStep[]>(INITIAL_PAIRING_STEPS);
+  const [currentPulse, setCurrentPulse] = useState<string | null>(null);
   const terminalRef = useRef<TerminalHandle>(null);
 
   const handleConnect = async (agent: Agent) => {
@@ -221,9 +222,13 @@ function App() {
       // Hook into the Discovery Loop to show real-time progress
       (ClawPairingManager as any).setHandshakePulse((msg: string) => {
         terminalRef.current?.writeln(`\x1b[90m${msg}\x1b[0m`);
-        // If the message contains [APPROVAL], it means we found the right preset
-        if (msg.includes("[CHALLENGE]")) {
+        setCurrentPulse(msg);
+        
+        // Dynamic step advancement based on logs
+        if (msg.includes("[SUCCESS]")) {
            setPairingSteps(prev => prev.map(s => s.id === "handshake" ? { ...s, status: "complete" } : s.id === "approval" ? { ...s, status: "active" } : s));
+        } else if (msg.includes("[AUTH] Identity proof submitted")) {
+           setPairingSteps(prev => prev.map(s => s.id === "approval" ? { ...s, status: "complete" } : s.id === "finalize" ? { ...s, status: "active" } : s));
         }
       });
 
@@ -415,6 +420,13 @@ function App() {
         searchTerm={searchTerm}
         selectedAgentId={selectedAgent?.id}
         onSelect={handleConnect}
+        onDelete={(id) => {
+          if (selectedAgent?.id === id) {
+            setSelectedAgent(null);
+            setCurrentClient(null);
+            setAvailableTools([]);
+          }
+        }}
       />
 
       {/* Main Multi-Stage Hub */}
@@ -475,6 +487,7 @@ function App() {
               steps={pairingSteps} 
               onCancel={() => setPairingTask(null)} 
               error={pairingTask.error}
+              statusMessage={currentPulse}
               customClientId={customClientId}
               setCustomClientId={setCustomClientId}
               showAdvanced={showAdvanced}

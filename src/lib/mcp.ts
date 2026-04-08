@@ -388,58 +388,71 @@ export class ClawPairingManager {
 
     for (const preset of probeList) {
       let activeHost = host;
-      if (host.includes("localhost") || host === "127.0.0.1") {
-        activeHost = "148.230.87.184:18789";
-        this.onHandshakePulse?.(`[DEBUG] Force-Redirecting localhost -> ${activeHost}`);
-      }
 
       for (const role of ["client", "operator"]) {
-        try {
-          this.onHandshakePulse?.(`[HANDSHAKE] Probing ${activeHost} (as ${preset.id})...`);
+        let attempts = 0;
+        const maxAttempts = 3;
 
-          // Step 1: Initiating fresh session for this specific probe
-          const challenge: any = await invoke("mcp_start_pairing", {
-            gatewayUrl: activeHost,
-            token: bootstrapToken,
-            deviceId: await IdentityManager.sha256Hex(IdentityManager.getIdentity().rawPublicKey),
-            deviceName: "Carapace Terminal"
-          });
+        while (attempts < maxAttempts) {
+          try {
+            this.onHandshakePulse?.(`[HANDSHAKE] Probing ${activeHost} (as ${preset.id}, role: ${role}${attempts > 0 ? `, retry: ${attempts}` : ''})...`);
 
-          const { nonce, ts } = challenge;
-          if (!nonce || !ts) throw new Error("Gateway challenge invalid.");
+            // Step 1: Initiating fresh session for this specific probe
+            const challenge: any = await invoke("mcp_start_pairing", {
+              gatewayUrl: activeHost,
+              token: bootstrapToken,
+              deviceId: await IdentityManager.sha256Hex(IdentityManager.getIdentity().rawPublicKey),
+              deviceName: "Carapace Terminal"
+            });
 
-          // Minimalist Client Identity (Strict Schema Match)
-          const client_identity = {
-            id: preset.clientId,
-            version: preset.version,
-            mode: preset.mode,
-            platform: preset.platform,
-            deviceFamily: "desktop"
-          };
+            const { nonce, ts } = challenge;
+            if (!nonce || !ts) throw new Error("Gateway challenge invalid.");
+            this.onHandshakePulse?.(`[AUTH] Gateway challenge solved (Nonce: ${nonce.substring(0,6)}...)`);
 
-          const identityProof = await IdentityManager.signChallenge(nonce, ts, bootstrapToken, {
-            ...client_identity,
-            role: role // Pass role ONLY to signer, not to the transmitted object
-          });
+            // Minimalist Client Identity (Strict Schema Match)
+            const client_identity = {
+              id: preset.clientId,
+              version: preset.version,
+              mode: preset.mode,
+              platform: preset.platform,
+              deviceFamily: "desktop"
+            };
 
-          // Step 3: Completing handshake with current identity telemetry
-          const resultJson: string = await invoke("mcp_finish_pairing", {
-            deviceIdentity: identityProof,
-            clientIdentity: client_identity,
-            bootstrapToken: bootstrapToken
-          });
+            const identityProof = await IdentityManager.signChallenge(nonce, ts, bootstrapToken, {
+              ...client_identity,
+              role: role // Pass role ONLY to signer, not to the transmitted object
+            });
 
-          this.onHandshakePulse?.(`[SUCCESS] Gateway accepted identity: ${preset.id}`);
-          return resultJson;
+            this.onHandshakePulse?.(`[AUTH] Identity proof submitted. Synchronizing protocol...`);
 
-        } catch (e: any) {
-          const errorMsg = e.toString();
-          if (!errorMsg.includes("constant") && !errorMsg.includes("schema") && !errorMsg.includes("params")) {
-            // Fatal errors (like 'Session closed') are handled here
-            console.error(`[NATIVE] Probe failed for ${preset.id}:${role}:`, errorMsg);
+            // Step 3: Completing handshake with current identity telemetry
+            const resultJson: string = await invoke("mcp_finish_pairing", {
+              deviceIdentity: identityProof,
+              clientIdentity: client_identity,
+              bootstrapToken: bootstrapToken
+            });
+
+            this.onHandshakePulse?.(`[SUCCESS] Gateway accepted identity: ${preset.id}`);
+            return resultJson;
+
+          } catch (e: any) {
+            attempts++;
+            const errorMsg = e.toString();
+            
+            // Fatal errors that shouldn't be retried immedately (e.g. Invalid Token)
+            if (errorMsg.includes("AUTH_REJECTED") || errorMsg.includes("unauthorized")) {
+               throw new Error(errorMsg);
+            }
+
+            if (attempts < maxAttempts) {
+              const delay = Math.pow(2, attempts) * 500; // 1s, 2s...
+              this.onHandshakePulse?.(`[WARN] Probe ${preset.id}:${role} failed (${errorMsg}). Retrying in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+            } else {
+              this.onHandshakePulse?.(`[ERROR] Discovery failed for ${preset.id}:${role} after ${maxAttempts} attempts.`);
+              lastError = new Error(`Discovery failed: ${errorMsg}`);
+            }
           }
-          this.onHandshakePulse?.(`[WARN] ${preset.id}:${role} rejected. Retrying...`);
-          lastError = new Error(`Discovery failed: ${errorMsg}`);
         }
       }
     }

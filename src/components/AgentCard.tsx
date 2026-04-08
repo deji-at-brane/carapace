@@ -5,7 +5,6 @@ import {
   Cpu, 
   Activity,
   Zap,
-  ChevronRight,
   ShieldCheck
 } from "lucide-react";
 import { Agent } from "@/lib/types";

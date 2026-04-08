@@ -118,6 +118,23 @@ export class CarapaceDB {
     );
   }
 
+  async deleteAgent(id: string, uri: string) {
+    console.log(`[DB] Purging all data for agent: ${id} (${uri})`);
+    
+    // 1. Delete associated credentials first
+    await this.deleteCredential(uri);
+    
+    // 2. Find and delete all sessions associated with this agent_uri
+    const sessions = await this.select<any[]>("SELECT id FROM sessions WHERE agent_uri = ?", [uri]);
+    for (const session of sessions) {
+      await this.execute("DELETE FROM messages WHERE session_id = ?", [session.id]);
+    }
+    await this.execute("DELETE FROM sessions WHERE agent_uri = ?", [uri]);
+    
+    // 3. Delete the agent record itself
+    await this.execute("DELETE FROM agents WHERE id = ?", [id]);
+  }
+
   async upsertAgent(agent: Omit<Agent, "created_at">) {
     await this.execute(
       "INSERT INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uri) DO UPDATE SET name = excluded.name, description = excluded.description",
