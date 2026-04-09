@@ -21,7 +21,21 @@ export interface MCPResponse {
   jsonrpc: "2.0";
   id: number | string;
   result?: any;
-  error?: any;
+  error?: {
+    code: number;
+    message: string;
+    data?: any;
+  };
+}
+
+/**
+ * Enhanced Error for A2A Interaction
+ */
+export class ProtocolError extends Error {
+  constructor(message: string, public suggestion?: string) {
+    super(message);
+    this.name = "ProtocolError";
+  }
 }
 
 export interface MCPNotification {
@@ -84,6 +98,7 @@ class WebSocketTransport implements Transport {
       this.queue.push(message);
       return;
     }
+    console.log(`[WIRE SEND] 🛰️ WS -> ${this.url}`);
     this.socket.send(JSON.stringify(message));
   }
 
@@ -228,18 +243,27 @@ class MockTransport implements Transport {
 }
 
 /**
- * SSE (Server-Sent Events) Transport
+ * SSE (Server-Sent Events) Transport (Fetch-Stream Powered)
  */
 class SSETransport implements Transport {
-  private eventSource: EventSource | null = null;
+  private abortController: AbortController | null = null;
   private endpoint: string | null = null;
   private messageCallback?: (msg: any) => void;
+  private isConnected = false;
+  private sessionId = `carapace-${Math.random().toString(36).substring(2, 10)}`;
 
-  constructor(private url: string, private headers: Record<string, string> = {}) {}
+  constructor(
+    private url: string, 
+    private headers: Record<string, string> = {}, 
+    private options: { streamUrl?: string } = {}
+  ) {}
 
   async send(message: any) {
-    // If no command endpoint discovered yet, use the initial URL as the POST target
-    const target = this.endpoint || this.url;
+    const targetUrl = new URL(this.endpoint || this.url);
+    targetUrl.searchParams.set("sessionId", this.sessionId);
+    const target = targetUrl.toString();
+
+    console.log(`[WIRE SEND] 📤 POST -> ${target}`);
     
     const response = await fetch(target, {
       method: "POST",
@@ -250,55 +274,120 @@ class SSETransport implements Transport {
       body: JSON.stringify(message),
     });
 
-    if (!response.ok) {
+    if (response.ok) {
+      const bodyText = await response.text();
+      if (bodyText.trim().startsWith("{")) {
+        try {
+          const json = JSON.parse(bodyText);
+          if (this.messageCallback) {
+            console.log(`[SSE] Handled Synchronous Response: ${json.id || 'Notification'}`);
+            this.messageCallback(json);
+          }
+        } catch (e) {
+          // Response body was not JSON, normal for some SSE implementations
+        }
+      }
+    } else {
       const errorText = await response.text();
       throw new Error(`SSE Post to ${target} failed: ${response.status} ${errorText}`);
     }
 
-    // In some A2A implementations, the first POST response might contain the SSE endpoint or session ID
+    // X-SSE-Endpoint discovery
     if (response.headers.get("X-SSE-Endpoint")) {
       const sseUrl = response.headers.get("X-SSE-Endpoint")!;
-      if (!this.eventSource) this.connect(sseUrl);
+      if (!this.isConnected) this.connect(sseUrl);
     }
   }
 
-  private connect(sseUrl: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      console.log(`[SSE] Opening stream at ${sseUrl}...`);
-      this.eventSource = new EventSource(sseUrl);
+  private async connect(sseUrl: string) {
+    if (this.isConnected) return;
+    this.isConnected = true;
+    this.abortController = new AbortController();
+
+    const authHeader = this.headers["Authorization"];
+    let finalSseUrl = sseUrl;
+    
+    try {
+      const urlObj = new URL(sseUrl);
+      urlObj.searchParams.set("sessionId", this.sessionId);
       
-      this.eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (this.messageCallback) this.messageCallback(data);
-        } catch (e) {
-          console.error("[SSE] Failed to parse event data:", event.data);
+      // Dual-Layer Auth (from previous step)
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const token = authHeader.substring(7);
+        urlObj.searchParams.set("token", token);
+        urlObj.searchParams.set("access_token", token);
+      }
+      finalSseUrl = urlObj.toString();
+    } catch (e) {}
+
+    console.log(`[SSE] Initializing Session-Linked Stream: ${this.sessionId}...`);
+
+    try {
+      const response = await fetch(finalSseUrl, {
+        headers: {
+          ...this.headers,
+        },
+        signal: this.abortController.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`SSE Stream failed: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("SSE Stream Body is empty");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        
+        // SSE lines are separated by double newlines
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+
+        for (const part of parts) {
+          const lines = part.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const data = JSON.parse(line.substring(6));
+                if (this.messageCallback) this.messageCallback(data);
+              } catch (e) {
+                console.error("[SSE] Failed to parse stream data:", line);
+              }
+            }
+          }
         }
-      };
-
-      this.eventSource.onopen = () => {
-        console.log(`[SSE] Stream opened at ${sseUrl}`);
-        resolve();
-      };
-
-      this.eventSource.onerror = (err) => {
-        console.error(`[SSE] Stream error at ${sseUrl}:`, err);
-        this.eventSource?.close();
-        reject(err);
-      };
-    });
+      }
+    } catch (err) {
+      console.error("[SSE] Stream terminal error:", err);
+      this.isConnected = false;
+      // Reconnect logic
+      setTimeout(() => this.connect(sseUrl), 3000);
+    }
   }
 
   onMessage(callback: (message: any) => void) {
     this.messageCallback = callback;
-    // Auto-initiate SSE if not already started (assuming the base URL carries the stream)
-    if (!this.eventSource) {
-      this.connect(this.url).catch(err => console.error("[SSE] Auto-connect failed:", err));
+    if (!this.isConnected) {
+      const sseUrl = this.options.streamUrl || this.url;
+      // Standard heuristic for A2A endpoints
+      const finalSseUrl = (!this.options.streamUrl && sseUrl.endsWith("/a2a")) 
+        ? `${sseUrl}/stream` 
+        : sseUrl;
+      
+      this.connect(finalSseUrl).catch(err => console.error("[SSE] Auto-connect failed:", err));
     }
   }
 
   close() {
-    this.eventSource?.close();
+    this.abortController?.abort();
+    this.isConnected = false;
   }
 }
 
@@ -322,20 +411,27 @@ export class MCPClient {
   public handshakePromise: Promise<void>;
   private resolveHandshake!: () => void;
   private rejectHandshake!: (err: any) => void;
-  private handshakeConfirmed: boolean = false;
+  private signalMethod: string = "message/send";
 
-  constructor(private transport: Transport, onLog?: (entry: LogEntry) => void, authToken?: string, isA2A: boolean = false) {
+  constructor(
+    private transport: Transport, 
+    onLog?: (entry: LogEntry) => void, 
+    authToken?: string, 
+    private card?: any
+  ) {
     this.onLog = onLog;
     this.authToken = authToken || null;
 
     // CRITICAL: Register message callback before ANY early returns
     this.transport.onMessage((msg) => this.handleIncoming(msg));
 
-    // A2A Mode: Skip the OpenClaw v3 handshakes entirely.
-    if (isA2A) {
-      this.handshakePromise = Promise.resolve();
-      this.handshakeConfirmed = true;
-      console.log("[A2A] Client initialized in federated mode.");
+    // A2A Mode Logic: sensing capabilities
+    const capabilities = this.card?.capabilities || [];
+    const isA2A = !!this.card;
+
+      // The Carapace Standard: Agents must support message/send
+      this.signalMethod = "message/send";
+      console.log(`[A2A] Universal Client synchronized for ${this.card?.name || 'Remote Agent'}.`);
       return;
     }
 
@@ -515,6 +611,7 @@ export class MCPClient {
     // JSON-RPC Response Dispatcher
     if (message.id !== undefined && this.handlers.has(message.id)) {
       const handler = this.handlers.get(message.id);
+      
       if (handler) {
         handler(message as MCPResponse);
         this.handlers.delete(message.id);
@@ -556,7 +653,7 @@ export class MCPClient {
   }
 
   /**
-   * MCP Initialize Handshake
+   * MCP Initialize Handshake: Federated Identity Sync
    */
   async initialize(): Promise<any> {
     this.onHandshakePulse?.("[PROTOCOL] Negotiating MCP v1.0.0...");
@@ -564,26 +661,33 @@ export class MCPClient {
     try {
       const result = await this.request("initialize", {
         protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: {
-          name: "openclaw-js",
-          version: "1.4.2"
+        capabilities: { 
+          streaming: true,
+          sampling: true,
+          logging: true
+        },
+        clientInfo: { 
+          name: "carapace-terminal", 
+          version: "2.0.0",
+          protocolUrl: "https://raw.githubusercontent.com/deji-at-brane/carapace/main/SKILL.md" 
         }
       });
 
-      const serverCapabilities = result.capabilities || {};
-      const toolSupport = serverCapabilities.tools ? "AVAILABLE" : "NONE";
-      const resourceSupport = serverCapabilities.resources ? "AVAILABLE" : "NONE";
-      
-      this.onHandshakePulse?.(`[PROTOCOL] Handshake OK. Tools: ${toolSupport}, Resources: ${resourceSupport}`);
-      
-      // Confirm initialization
-      this.notify("notifications/initialized");
-      this.onHandshakePulse?.("[SUCCESS] Node Synchronized.");
-      
+      if (result) {
+        this.handshakeConfirmed = true;
+        await this.notify("notifications/initialized", {});
+        this.onHandshakePulse?.("\x1b[32m[SUCCESS]\x1b[0m Protocol synchronized.");
+        console.log("[MCP] Handshake complete via A2A.");
+      }
       return result;
-    } catch (e) {
-      this.onHandshakePulse?.(`[PROTOCOL ERROR] Handshake Failed: ${e}`);
+    } catch (e: any) {
+      if (e.message?.includes("Method not found") || e.code === -32601) {
+        console.warn("[PROTOCOL] 'initialize' method not supported by peer. Assuming pre-synchronized state.");
+        this.onHandshakePulse?.("\x1b[32m[SUCCESS]\x1b[0m Direct Peer Connection Active.");
+        this.handshakeConfirmed = true;
+        return { protocolVersion: "legacy", capabilities: {} };
+      }
+      this.onHandshakePulse?.(`\x1b[31m[ERROR]\x1b[0m Handshake Failed: ${e}`);
       throw e;
     }
   }
@@ -618,9 +722,19 @@ export class MCPClient {
   }
 
   /**
-   * Google A2A: Send a multimodal message
+   * Universal Signaling: Works across Task-based and Message-based agents
    */
   async sendMessage(content: string, contentType: string = "text/plain"): Promise<any> {
+    if (this.signalMethod === "task/create") {
+      return await this.request("task/create", {
+        description: content,
+        metadata: { 
+          source: "carapace-signal",
+          originalContent: content 
+        }
+      });
+    }
+
     return await this.request("message/send", {
       parts: [
         {
@@ -839,7 +953,7 @@ export class ClawPairingManager {
 /**
  * Transport Factory Helper
  */
-export function createTransport(uri: string, token?: string): Transport {
+export function createTransport(uri: string, token?: string, options: { streamUrl?: string } = {}): Transport {
   let finalUri = uri;
   
   // Defensive: Handle raw IP or port-only URIs by assuming claw://
@@ -864,11 +978,21 @@ export function createTransport(uri: string, token?: string): Transport {
     }
     if (url.protocol === "http:" || url.protocol === "https:") {
       // For HTTP/HTTPS, we use SSE transport with optional auth headers
-      return new SSETransport(finalUri, headers);
+      return new SSETransport(finalUri, headers, options);
     }
-    if (url.protocol === "claw:" || url.protocol === "agent:" || url.protocol === "a2a:") {
-      // Protocol normalization for WebSocket transport
-      const wsUri = finalUri.replace(/^(claw|agent|a2a):/, "ws:");
+    if (url.protocol === "a2a:") {
+      // 🌐 NEW: Federated A2A usually runs over SSE/HTTP for broad compatibility
+      const tokenFromUri = url.searchParams.get("token");
+      if (tokenFromUri && !headers["Authorization"]) {
+        headers["Authorization"] = `Bearer ${tokenFromUri}`;
+      }
+      const httpUri = finalUri.replace(/^a2a:/, "http:");
+      return new SSETransport(httpUri, headers, options);
+    }
+
+    if (url.protocol === "claw:" || url.protocol === "agent:") {
+      // Legacy Protocol normalization for WebSocket transport
+      const wsUri = finalUri.replace(/^(claw|agent):/, "ws:");
       return new WebSocketTransport(wsUri);
     }
     // Fallback for custom schemes: Treat as WebSocket

@@ -61,9 +61,8 @@ export class CarapaceDB {
       );
     `);
 
-    // Zero-Knowledge Purge: Wipe any existing Alex records
-    await this.deleteAgent("alex-1", "claw://148.230.87.184:18789");
-    await this.deleteAgent("alex-2", "a2a://148.230.87.184:18889/?token=de54f9bd7501b494b180d2867bbfebe727eb380c62e23eb0cd2ea4322baf43a1");
+    // 💾 Persistence Enabled: Removing Nuclear Flush now that components are clean
+    console.log("[DB] Persistence Active: Maintaining local registries across sessions.");
     
     await this.seedAgents();
   }
@@ -71,7 +70,7 @@ export class CarapaceDB {
   async seedAgents() {
     console.log("[DB] Synchronizing Discovery Hub agent registry...");
     const defaultAgents = [
-      { id: "a2a-test-1", name: "A2A System Check", description: "Local federated agent for protocol verification.", uri: "http://localhost:1425", category: "Production", icon_name: "Zap" },
+      { id: "local-debug-1", name: "Local Protocol Debugger", description: "Internal A2A node for diagnostic verification.", uri: "http://localhost:1425", category: "INTERNAL", icon_name: "Activity" },
       { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "agent://research.carapace.io", category: "Research", icon_name: "Compass" },
       { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "agent://code.carapace.io", category: "Development", icon_name: "Terminal" },
       { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "agent://analysis.carapace.io", category: "Analysis", icon_name: "LayoutGrid" }

@@ -43,3 +43,13 @@ Instead of connecting directly to the agent's IP, Carapace acts as a client to a
    - Messages will come in two primary types:
      - `type: "text"` -> Render as standard markdown.
      - `type: "artifact"` -> Look up the corresponding React UI component based on the artifact's metadata schema and render the structured data natively.
+
+## Phase 3: High-Fidelity Signaling (The "Protocol")
+**Goal:** Standardize the JSON-RPC interface for bidirectional communication and observability.
+
+### Implementation Guide
+For all production-ready agents, you MUST implement the **[A2A Signal Protocol](A2A_SIGNAL_PROTOCOL.md)**.
+
+1.  **Strict Method Handlers**: Implement `initialize`, `notifications/initialized`, and `message/send`.
+2.  **Live Observability**: Use the `task/update` notification to push status and progress to the terminal cockpit.
+3.  **ANSI Palette Implementation**: Follow the standard color escape codes for consistent agent-terminal status reporting.

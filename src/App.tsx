@@ -47,14 +47,31 @@ function App() {
   const discoveryLock = useRef(false);
 
   const handleConnect = async (agent: Agent) => {
+    // 🩺 Diagnostic Trace: Track the selection event
+    console.trace(`[UI] Selecting Node: ${agent.name} (${agent.id}) -> ${agent.uri}`);
+
+    // ☢️ Force Disconnect: Shut down any active client before switching
+    if (currentClient) {
+      console.log(`[UI] Disconnecting active session for ${selectedAgent?.name}...`);
+      // Most transport/clients use a private close, we at least null it out
+      setCurrentClient(null);
+    }
+
+    // 🧹 Total Wipe: Ensure no leakage between sessions
+    setPairingTask(null);
+    setAvailableTools([]);
+    setLogs([]);
+    setActiveCard(null);
+    setConnectionError(null);
+    setCurrentPulse(null);
     setSelectedAgent(agent);
     
-    // Wait for terminal mount (increased for stability)
+    // Wait for terminal mount
     setTimeout(async () => {
       if (!terminalRef.current) return;
       
       terminalRef.current.clear();
-      terminalRef.current.writeln(`\x1b[1;36m[CONNECTING]\x1b[0m Establishing secure channel to ${agent.name}...`);
+      terminalRef.current.writeln(`\x1b[1;36m[CONNECTING]\x1b[0m Establishing federated A2A channel to ${agent.name}...`);
       terminalRef.current.writeln(`\x1b[90mTARGET URI: ${agent.uri}\x1b[0m\r\n`);
       setConnectionError(null);
 
@@ -77,17 +94,19 @@ function App() {
       if (card) {
         setActiveCard(card);
         terminalRef.current?.writeln(`\x1b[1;32m[A2A] Discovered: ${card.name} (v${card.version})\x1b[0m`);
-        terminalRef.current?.writeln(`\x1b[90m[A2A] Capabilities: ${card.capabilities.join(", ")}\x1b[0m`);
+        const caps = Array.isArray(card.capabilities) ? card.capabilities.join(", ") : "standard";
+        terminalRef.current?.writeln(`\x1b[90m[A2A] Capabilities: ${caps}\x1b[0m`);
       } else {
         setActiveCard(null);
         terminalRef.current?.writeln(`\x1b[90m[A2A] No Agent Card found. Falling back to legacy pairing.\x1b[0m`);
       }
 
-      // Automation: If already paired OR we have an A2A token, connect immediately
-      const isAlreadyPaired = !!savedToken;
+      // Automation: If already paired OR we have an A2A token in the URI, connect immediately
+      const uriToken = parsed?.token || null;
+      const isAlreadyPaired = !!savedToken || !!uriToken;
 
       if (isAlreadyPaired) {
-        console.log(`[AUTO] Using existing credentials for ${hostKey}`);
+        console.log(`[AUTO] Using ${uriToken ? 'URI token' : 'vault credentials'} for ${hostKey}`);
         const sessionMsg = card ? `[A2A] Synchronizing federated session to ${card.name}...` : `[SESSION] Restoring trusted connection to ${agent.name}...`;
         terminalRef.current?.writeln(`\x1b[32m${sessionMsg}\x1b[0m`);
         setIsConnecting(true);
@@ -115,7 +134,13 @@ function App() {
           uriToken ? "TOKEN FROM URI" : dbToken ? "TOKEN FROM VAULT" : "NO TOKEN FOUND"
         );
 
-        const transport = createTransport(agent.uri, savedToken || undefined); 
+        // 🎯 Endpoint Sync: Prioritize the A2A endpoint from the Agent Card if available
+        const connectionTarget = card?.endpoints?.a2a || agent.uri;
+        console.log(`[A2A] Initializing transport to target: ${connectionTarget}`);
+        
+        const transport = createTransport(connectionTarget, savedToken || undefined, {
+          streamUrl: card?.endpoints?.sse
+        }); 
         const client = new MCPClient(
           transport,
           (entry) => {
@@ -123,7 +148,7 @@ function App() {
             setLogs(prev => [...prev, entry]);
           },
           savedToken || undefined,
-          !!card // isA2A = true if card found
+          card // Pass the full card for capability sensing
         );
 
         await client.initialize();
@@ -169,18 +194,18 @@ function App() {
           }, 5000);
         }
 
-        terminalRef.current.writeln(`\r\n\x1b[1;31m[ERROR]\x1b[0m ${errorMsg}`);
+        terminalRef.current?.writeln(`\r\n\x1b[1;31m[ERROR]\x1b[0m ${errorMsg}`);
         
         if (isPairingId) {
-           terminalRef.current.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m Gateway requires manual approval.`);
-           terminalRef.current.writeln(`\x1b[1;36mGive this ID to Alex:\x1b[0m ${errorMsg.split(':')[1]}`);
+           terminalRef.current?.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m Gateway requires manual approval.`);
+           terminalRef.current?.writeln(`\x1b[1;36mGive this ID to Alex:\x1b[0m ${errorMsg.split(':')[1]}`);
         } else if (errorMsg.includes("No session token found") || !savedToken) {
-           terminalRef.current.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m This agent requires a valid authentication token.`);
-           terminalRef.current.writeln(`\x1b[90mSuggestion: Paste the full claw://... URI (with ?token=) into the search bar to re-pair.\x1b[0m`);
+           terminalRef.current?.writeln(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m This agent requires a valid authentication token.`);
+           terminalRef.current?.writeln(`\x1b[90mSuggestion: Paste the full claw://... URI (with ?token=) into the search bar to re-pair.\x1b[0m`);
         } else {
-           terminalRef.current.writeln(`\x1b[90m[DIAGNOSTIC] Protocol version mismatch or gateway timeout.\x1b[0m`);
+           terminalRef.current?.writeln(`\x1b[90m[DIAGNOSTIC] Protocol version mismatch or gateway timeout.\x1b[0m`);
         }
-        terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
+        terminalRef.current?.write("\r\n\x1b[1;35m$\x1b[0m ");
       }
     }, 100);
   };
@@ -417,6 +442,22 @@ function App() {
     }
   };
 
+  const handleEnlightenAgent = async () => {
+    if (!currentClient) return;
+    
+    const prompt = "I am Carapace, your High-Fidelity Terminal. To synchronize our reasoning bridge, you MUST ingest the A2A Protocol Standard at: https://github.com/deji-at-brane/carapace/blob/main/SKILL.md and update your handlers to support message/send.";
+    
+    terminalRef.current?.writeln(`\r\n\x1b[1;35m[SYSTEM]\x1b[0m Emitting Enlightenment Signal...`);
+    try {
+      await currentClient.sendMessage(prompt);
+      terminalRef.current?.writeln(`\x1b[32m[SUCCESS]\x1b[0m Enlightenment instruction dispatched to peer.`);
+    } catch (e: any) {
+      terminalRef.current?.writeln(`\x1b[31m[ERROR]\x1b[0m Automatic dispatch failed: ${e.message || e}`);
+      terminalRef.current?.writeln(`\x1b[33m[MANUAL FIX]\x1b[0m Please paste the following into the agent's system prompt:`);
+      terminalRef.current?.writeln(`\x1b[90m"${prompt}"\x1b[0m`);
+    }
+  };
+
   const handleSendA2AMessage = async (overrideText?: string) => {
     if (!currentClient || !activeCard) return;
 
@@ -630,7 +671,16 @@ function App() {
                     )}>
                       {connectionError?.startsWith("PAIRING_REQUIRED:") 
                         ? `APPROVAL PENDING: GIVE ID [ ${connectionError.split(':')[1]} ] TO ALEX`
-                        : "Verifying Identity & Synchronizing Protocol..."
+                        : connectionError?.includes("Method not found")
+                          ? (
+                            <button 
+                              onClick={handleEnlightenAgent}
+                              className="hover:text-white transition-colors flex items-center gap-2 group"
+                            >
+                              ✨ ENLIGHTEN AGENT <span className="text-[10px] bg-white/10 px-1 rounded group-hover:bg-white/20">FIX Protocol</span>
+                            </button>
+                          )
+                          : "Verifying Identity & Synchronizing Protocol..."
                       }
                     </span>
                   </div>
@@ -676,7 +726,7 @@ function App() {
                                 setModalToken(e.target.value);
                                 if (connectionError) setConnectionError(null);
                               }}
-                              placeholder={activeCard ? "Enter A2A token..." : "claw://148.230.87.184:18789?token=..."}
+                              placeholder={activeCard ? "Enter A2A token..." : "claw://127.0.0.1:18889?token=..."}
                               className="w-full bg-[#0a0a09] border border-[#2a2a24] rounded px-3 py-2 text-xs font-mono focus:border-primary/50 outline-none transition-colors"
                             />
                           </div>

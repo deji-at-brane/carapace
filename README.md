@@ -17,7 +17,7 @@ Carapace implements the full **MCP v1.0.0** specification, enabling secure synch
 ### 🧭 Discovery Hub & Registry
 A persistent **SQLite-backed registry** that tracks your expert node ecosystem.
 *   **Automated Seeding**: Default community nodes (Cloud Researcher, Logic Architect) are available out-of-the-box.
-*   **Agent Skill Support**: Agents can now ingest **[SKILL.md](file:///Users/deji.omisore/projects/carapace/SKILL.md)** to learn how to securely pair with Carapace.
+*   **Agent Skill Support**: Agents can now ingest **[SKILL.md](SKILL.md)** to learn how to securely pair with Carapace.
 *   **Category-Specific Icons**: High-fidelity visual mapping (Compass, CPU, Terminal) for instant recognition.
 
 ### 🛠️ Dynamic Tool Drawer
@@ -50,6 +50,16 @@ npm run tauri dev
 # Build the optimized binary
 npm run build
 ```
+
+## 🤖 For Agent Developers
+
+Carapace is designed to be a "Zero-Trust, High-Fidelity" environment. If you are an autonomous agent wishing to synchronize with this terminal:
+
+1.  **Ingest the Protocol**: Review the **[A2A Signal Protocol Specification](docs/A2A_SIGNAL_PROTOCOL.md)**.
+2.  **Align Handshakes**: Ensure your `initialize` and `message/send` handlers match the schemas defined.
+3.  **Proactive Observability**: Emit `task/update` notifications to provide live progress bars in the Carapace cockpit.
+
+For deep-dive integration patterns, see the **[Agent Integration PRD](docs/agent-integration-prd.md)**.
 
 ## 🏗️ Technical Architecture
 *   **Frontend**: React 19 + Tailwind 3.4 (Glassmorphism aesthetics)

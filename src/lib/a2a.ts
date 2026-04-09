@@ -37,9 +37,12 @@ export class A2AManager {
     // Normalize protocol: A2A cards are always fetched over HTTP(S)
     if (finalUrl.startsWith("claw://")) finalUrl = finalUrl.replace("claw://", "http://");
     if (finalUrl.startsWith("agent://")) finalUrl = finalUrl.replace("agent://", "http://");
+    if (finalUrl.startsWith("a2a://")) finalUrl = finalUrl.replace("a2a://", "http://");
     if (!finalUrl.includes("://")) finalUrl = `http://${finalUrl}`;
     
-    const cleanBase = finalUrl.replace(/\/$/, "");
+    // Safety: Strip query parameters and trailing slashes before path construction
+    const urlObj = new URL(finalUrl);
+    const cleanBase = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`.replace(/\/$/, "");
     const wellKnownUrl = `${cleanBase}/.well-known/agent.json`;
     
     console.log(`[A2A] Probing for Agent Card at ${wellKnownUrl}...`);
@@ -55,15 +58,35 @@ export class A2AManager {
         return null;
       }
       
-      const card = await response.json() as AgentCard;
+      const card = await response.json() as any;
       
-      // Basic validation
-      if (!card.name || !card.endpoints?.a2a) {
-        throw new Error("Invalid Agent Card: Missing name or A2A endpoint.");
+      // Fuzzy Validation: LLMs often flatten the schema or use synonymous keys
+      const name = card.name || card.agentName || "Discovered Agent";
+      const a2aEndpoint = card.endpoints?.a2a || card.endpoint || card.a2a_url || card.url || null;
+      
+      let capabilities = card.capabilities || [];
+      if (typeof capabilities === "string") {
+        capabilities = capabilities.split(",").map((s: string) => s.trim());
       }
+
+      if (!a2aEndpoint) {
+        throw new Error("Invalid Agent Card: No A2A endpoint found in registry response.");
+      }
+
+      // Re-normalize to the strict internal type
+      const validatedCard: AgentCard = {
+        name: name,
+        description: card.description || "No description provided.",
+        version: card.version || "1.0.0",
+        capabilities: Array.isArray(capabilities) ? capabilities : [capabilities],
+        endpoints: {
+          a2a: a2aEndpoint,
+          sse: card.endpoints?.sse || card.sse_url
+        }
+      };
       
-      console.log(`[A2A] Discovered Agent: ${card.name} (v${card.version})`);
-      return card;
+      console.log(`[A2A] Discovered Agent (Fuzzy Match): ${validatedCard.name}`);
+      return validatedCard;
     } catch (e) {
       console.error(`[A2A] Discovery error at ${wellKnownUrl}:`, e);
       return null;
