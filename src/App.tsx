@@ -450,6 +450,26 @@ function App() {
       try {
         unlisten = await onOpenUrl((urls) => {
           console.log("Deep link received:", urls);
+          const urlStr = Array.isArray(urls) ? urls[0] : urls;
+          if (urlStr && typeof urlStr === 'string' && urlStr.includes("agent/")) {
+            const rawTarget = urlStr.split("agent/")[1];
+            if (rawTarget) {
+              // Normalize deep link to standard a2a/claw URI
+              const finalUri = rawTarget.includes("://") ? rawTarget : `a2a://${rawTarget}`;
+              setSearchTerm(finalUri);
+              // Small delay to ensure UI transitions before probing
+              setTimeout(() => {
+                handleConnect({
+                  id: "deep-link-discovery",
+                  name: "Deep Link Agent",
+                  description: "Discovered via carapace:// protocol.",
+                  uri: finalUri,
+                  category: "Discovery",
+                  icon_name: "Zap"
+                });
+              }, 500);
+            }
+          }
         });
       } catch (error) {
         console.error("Failed to initialize deep link listener:", error);

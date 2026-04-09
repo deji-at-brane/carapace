@@ -866,9 +866,9 @@ export function createTransport(uri: string, token?: string): Transport {
       // For HTTP/HTTPS, we use SSE transport with optional auth headers
       return new SSETransport(finalUri, headers);
     }
-    if (url.protocol === "claw:" || url.protocol === "agent:") {
+    if (url.protocol === "claw:" || url.protocol === "agent:" || url.protocol === "a2a:") {
       // Protocol normalization for WebSocket transport
-      const wsUri = finalUri.replace(/^(claw|agent):/, "ws:");
+      const wsUri = finalUri.replace(/^(claw|agent|a2a):/, "ws:");
       return new WebSocketTransport(wsUri);
     }
     // Fallback for custom schemes: Treat as WebSocket

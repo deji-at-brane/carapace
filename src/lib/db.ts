@@ -61,8 +61,9 @@ export class CarapaceDB {
       );
     `);
 
-    // One-time Purge for Alex Reset
+    // Zero-Knowledge Purge: Wipe any existing Alex records
     await this.deleteAgent("alex-1", "claw://148.230.87.184:18789");
+    await this.deleteAgent("alex-2", "a2a://148.230.87.184:18889/?token=de54f9bd7501b494b180d2867bbfebe727eb380c62e23eb0cd2ea4322baf43a1");
     
     await this.seedAgents();
   }
