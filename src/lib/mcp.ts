@@ -362,17 +362,28 @@ interface HandshakePreset {
 }
 
 const HANDSHAKE_PRESETS: HandshakePreset[] = [
-  { id: "node-host", clientId: "node-host", name: "Node Host (Core)", mode: "cli", platform: "macos", version: "1.4.2" }
+  { id: "native-macos", clientId: "openclaw-macos", name: "Official macOS", mode: "cli", platform: "macos", version: "1.0.0" }
 ];
 
 /**
  * Hermes / OpenClaw Gateway Pairing Manager
+ * USES WINDOW-LEVEL SINGLETON TO PREVENT HMR GHOST LOOPS
  */
-export class ClawPairingManager {
-  private static onHandshakePulse?: (msg: string) => void;
+const GLOBAL_LOCK_KEY = "__OPENCLAW_DISCOVERY_LOCK__";
+const getLock = () => (window as any)[GLOBAL_LOCK_KEY] || { active: false, aborted: false };
+const setLock = (val: { active: boolean, aborted: boolean }) => (window as any)[GLOBAL_LOCK_KEY] = val;
 
-  static setHandshakePulse(callback: (msg: string) => void) {
-    this.onHandshakePulse = callback;
+export class ClawPairingManager {
+  private static onHandshakePulse: ((msg: string) => void) | null = null;
+  private static lastPulse: string | null = null;
+
+  static setHandshakePulse(handler: (msg: string) => void) {
+    this.onHandshakePulse = (msg: string) => {
+      if (getLock().aborted) return; 
+      if (msg === this.lastPulse) return; 
+      this.lastPulse = msg;
+      handler(msg);
+    };
   }
 
   /**
@@ -380,28 +391,33 @@ export class ClawPairingManager {
    */
   private static async runDiscovery(host: string, bootstrapToken: string, customClientId?: string) {
     let lastError: Error | null = null;
-    
-    // Build the probe list: Custom override comes first if provided
+    const identity = IdentityManager.getIdentity();
+    const deviceId = await IdentityManager.sha256Fingerprint(identity.rawPublicKey);
+    this.onHandshakePulse?.(`[LOOP] v6 Unified: Fingerprint accepted as ${deviceId.substring(0,8)}...`);
+
     const probeList: HandshakePreset[] = customClientId 
       ? [{ id: "manual-override", clientId: customClientId, name: "Manual Override", mode: "cli", platform: "macos", version: "1.4.2" }, ...HANDSHAKE_PRESETS]
       : HANDSHAKE_PRESETS;
 
     for (const preset of probeList) {
+      if (getLock().aborted) return false;
       let activeHost = host;
 
-      for (const role of ["client", "operator"]) {
+      for (const role of ["operator", "client"]) {
+        if (getLock().aborted) return false;
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 2;
 
         while (attempts < maxAttempts) {
+          if (getLock().aborted) return false;
           try {
-            this.onHandshakePulse?.(`[HANDSHAKE] Probing ${activeHost} (as ${preset.id}, role: ${role}${attempts > 0 ? `, retry: ${attempts}` : ''})...`);
+            this.onHandshakePulse?.(`[HANDSHAKE] Probing ${activeHost} (as ${preset.id}, role: ${role})...`);
 
-            // Step 1: Initiating fresh session for this specific probe
+            // Step 1: Initiating fresh session with UNIFIED ID
             const challenge: any = await invoke("mcp_start_pairing", {
               gatewayUrl: activeHost,
               token: bootstrapToken,
-              deviceId: await IdentityManager.sha256Hex(IdentityManager.getIdentity().rawPublicKey),
+              deviceId: deviceId, // <--- UNIFIED
               deviceName: "Carapace Terminal"
             });
 
@@ -409,7 +425,7 @@ export class ClawPairingManager {
             if (!nonce || !ts) throw new Error("Gateway challenge invalid.");
             this.onHandshakePulse?.(`[AUTH] Gateway challenge solved (Nonce: ${nonce.substring(0,6)}...)`);
 
-            // Minimalist Client Identity (Strict Schema Match)
+            // Strictly Minimalist Client Identity (Matches Success Script)
             const client_identity = {
               id: preset.clientId,
               version: preset.version,
@@ -432,15 +448,37 @@ export class ClawPairingManager {
               bootstrapToken: bootstrapToken
             });
 
-            this.onHandshakePulse?.(`[SUCCESS] Gateway accepted identity: ${preset.id}`);
-            return resultJson;
+            const parsed = JSON.parse(resultJson);
+            if (parsed.ok) {
+              this.onHandshakePulse?.(`[SUCCESS] Gateway accepted identity: ${preset.id}`);
+              return resultJson;
+            } else {
+              const err = parsed.error || {};
+              throw new Error(err.message || "Handshake rejected");
+            }
 
           } catch (e: any) {
             attempts++;
             const errorMsg = e.toString();
+            this.onHandshakePulse?.(`[RAW ERROR] ${errorMsg}`);
             
-            // Fatal errors that shouldn't be retried immedately (e.g. Invalid Token)
-            if (errorMsg.includes("AUTH_REJECTED") || errorMsg.includes("unauthorized")) {
+            // FATAL: If unauthorized/expired, STOP retrying immediately and LOCK everything.
+            if (errorMsg.includes("unauthorized") || errorMsg.includes("expired") || errorMsg.includes("token")) {
+              const fatalMsg = "Fatal: Bootstrap Token expired. Generate a fresh code in Alex.";
+              setLock({ ...getLock(), aborted: true });
+              this.onHandshakePulse?.(`[STOP] ${fatalMsg}`);
+              return false; // Break the Discovery loop entirely
+            }
+
+            // If the server explicitly rejected the ID or schema, we skip this preset/role combo immediately.
+            if (errorMsg.includes("must be equal to constant") || errorMsg.includes("unexpected property")) {
+              this.onHandshakePulse?.(`[ID Rejected] ${preset.clientId}:${role} invalid for this gateway.`);
+              break; // Move to next role/preset
+            }
+
+            // Fatal errors that shouldn't be retried (e.g. truly Invalid Token)
+            // We only throw here if the error doesn't look like an identity mismatch.
+            if ((errorMsg.includes("unauthorized") || errorMsg.includes("token")) && !errorMsg.includes("constant")) {
                throw new Error(errorMsg);
             }
 
@@ -463,27 +501,38 @@ export class ClawPairingManager {
    * Initiates the native multi-stage handshake with discovery.
    */
   static async initiate(wsUrl: string, bootstrapToken: string, customClientId?: string): Promise<any> {
-    // Determine base URL for credential storage
-    let finalGateway = wsUrl;
-    if (wsUrl.startsWith('ws://')) finalGateway = wsUrl.replace('ws://', 'http://');
-    if (wsUrl.startsWith('wss://')) finalGateway = wsUrl.replace('wss://', 'https://');
-    if (!finalGateway.includes('://')) finalGateway = `http://${finalGateway}`;
-    finalGateway = finalGateway.replace(/\/$/, '');
-
+    const lock = getLock();
+    if (lock.active) throw new Error("A discovery session is already in progress.");
+    
+    setLock({ active: true, aborted: false });
+    this.lastPulse = null; 
+    
     try {
       const resultJson = await this.runDiscovery(wsUrl, bootstrapToken, customClientId);
+    
+      // Determine base URL for credential storage
+      let finalGateway = wsUrl;
+      if (wsUrl.startsWith('ws://')) finalGateway = wsUrl.replace('ws://', 'http://');
+      if (wsUrl.startsWith('wss://')) finalGateway = wsUrl.replace('wss://', 'https://');
+      if (!finalGateway.includes('://')) finalGateway = `http://${finalGateway}`;
+      finalGateway = finalGateway.replace(/\/$/, '');
+
+      if (wsUrl.includes("/vss/ws")) {
+        this.onHandshakePulse?.("[INFO] Using VSS/WS proxy route...");
+      }
+      
       const authResult = JSON.parse(resultJson);
       const successData = authResult.result || {};
       const sessionToken = successData.token || authResult.api_token || bootstrapToken;
-      
+
       return {
-        api_token: sessionToken,
+        ...authResult,
         gatewayUrl: finalGateway,
+        api_token: sessionToken,
         result: successData
-      }; 
-    } catch (error) {
-      console.error("[PROTOCOL ERROR] Handshake failed:", error);
-      throw error;
+      };
+    } finally {
+      setLock({ active: false, aborted: false });
     }
   }
 

@@ -39,6 +39,7 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [currentPulse, setCurrentPulse] = useState<string | null>(null);
   const terminalRef = useRef<TerminalHandle>(null);
+  const discoveryLock = useRef(false);
 
   const handleConnect = async (agent: Agent) => {
     setSelectedAgent(agent);
@@ -193,6 +194,11 @@ function App() {
   };
 
   const startClawPairing = async (uri: string, existingAgent?: Agent) => {
+    if (discoveryLock.current) {
+      console.warn("[AUTH] Discovery already in progress. Ignoring duplicate trigger.");
+      return;
+    }
+
     let targetUri = uri.trim();
     
     // AUTO-DECODE: Handle raw Base64 Setup Codes (starting with {)
@@ -224,6 +230,12 @@ function App() {
         terminalRef.current?.writeln(`\x1b[90m${msg}\x1b[0m`);
         setCurrentPulse(msg);
         
+        // FATAL INTERRUPT: If mcp.ts reports a stop, we update the UI modal immediately
+        if (msg.includes("[STOP] Fatal")) {
+           setPairingTask({ active: true, error: msg.split('] ')[1] });
+           setIsConnecting(false);
+        }
+
         // Dynamic step advancement based on logs
         if (msg.includes("[SUCCESS]")) {
            setPairingSteps(prev => prev.map(s => s.id === "handshake" ? { ...s, status: "complete" } : s.id === "approval" ? { ...s, status: "active" } : s));
@@ -233,6 +245,7 @@ function App() {
       });
 
       terminalRef.current?.writeln(`\x1b[90m[HANDSHAKE] PROBE TARGET: ${parsed.host}\x1b[0m`);
+      discoveryLock.current = true;
       const result = await ClawPairingManager.initiate(parsed.host, parsed.token, customClientId || undefined);
       
       const data = typeof result === 'string' ? JSON.parse(result) : result;
@@ -328,6 +341,11 @@ function App() {
       await checkAndPoll();
     } catch (error: any) {
       setPairingTask({ active: true, error: error.message });
+      setIsConnecting(false);
+    } finally {
+      discoveryLock.current = false;
+      // SILENCE: Kill the listener so ghost logs don't vibrate the UI
+      (ClawPairingManager as any).setHandshakePulse(() => {});
     }
   };
 

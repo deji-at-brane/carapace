@@ -20,9 +20,19 @@ export class IdentityManager {
     let secretKey: Uint8Array;
 
     if (stored) {
-      secretKey = new Uint8Array(JSON.parse(stored));
+      try {
+        secretKey = new Uint8Array(JSON.parse(stored));
+        // Reset if this is a legacy identity
+        if (secretKey.length !== 64) {
+          localStorage.removeItem(this.STORAGE_KEY);
+          return this.getIdentity(); 
+        }
+      } catch (e) {
+        localStorage.removeItem(this.STORAGE_KEY);
+        return this.getIdentity();
+      }
     } else {
-      console.log("[IDENTITY] Generating permanent Ed25519 terminal identity.");
+      console.log("[IDENTITY] Generating permanent terminal identity.");
       const keypair = nacl.sign.keyPair();
       secretKey = keypair.secretKey;
       localStorage.setItem(this.STORAGE_KEY, JSON.stringify(Array.from(secretKey)));
@@ -32,12 +42,10 @@ export class IdentityManager {
     const publicKey = keypair.publicKey;
     
     // VERIFIED: OpenClaw v3 requires a SHA-256 fingerprint of the public key as the device identity.
-    // This is more stable than using raw keys directly across different protocol versions.
     const publicKeyBase64 = btoa(String.fromCharCode(...publicKey));
     const urlSafePublic = this.toUrlSafe(publicKeyBase64);
     
     return {
-      // Note: Full deviceId calculation is moved to async signChallenge for SHA-256 compatibility
       publicKey: urlSafePublic,
       secretKey: keypair.secretKey,
       keypair,
@@ -46,15 +54,22 @@ export class IdentityManager {
   }
 
   /**
-   * Helper to hash a Uint8Array with SHA-256 and return Hex.
+   * Helper to generate a Lowercase Hex SHA-256 Fingerprint.
+   * VERIFIED: SKILL.md strictly requires Hex-encoded fingerprints for OpenClaw v3.
    */
-  public static async sha256Hex(data: Uint8Array): Promise<string> {
-    // Slicing Ensures we have a fresh 32-byte ArrayBuffer, not a view into a 64-byte secret key buffer
+  public static async sha256Fingerprint(data: Uint8Array): Promise<string> {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data.slice().buffer);
     return Array.from(new Uint8Array(hashBuffer))
       .map(b => b.toString(16).padStart(2, '0'))
       .join('')
       .toLowerCase();
+  }
+
+  /**
+   * Legacy Hex helper (maintained for pulse logs if needed)
+   */
+  public static async sha256Hex(data: Uint8Array): Promise<string> {
+    return this.sha256Fingerprint(data);
   }
 
   private static publicKeyToBase64(publicKey: Uint8Array) {
@@ -72,13 +87,25 @@ export class IdentityManager {
     client: { id: string, mode: string, platform: string, role?: string }
   ) {
     const identity = this.getIdentity();
-    const deviceId = await this.sha256Hex(identity.rawPublicKey);
+    const deviceId = await this.sha256Fingerprint(identity.rawPublicKey);
     
     const role = client.role || 'client'; // Default to 'client' for traditional pairing
 
-    // v3 Standard Signature Payload (Must match the transmitted client object exactly)
-    // format: v3|deviceId|clientId|clientMode|role|scopes|signedAt|token|nonce|platform|deviceFamily
-    const payload = `v3|${deviceId}|${client.id}|${client.mode}|${role}||${ts}|${token}|${nonce}|${client.platform}|desktop`;
+    // v3 Standard Signature Payload (Must match protocol grounding)
+    // format: v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily
+    const payload = [
+      'v3',
+      deviceId,
+      client.id,
+      client.mode,
+      role,
+      '', // scopes (empty)
+      ts.toString(),
+      token,
+      nonce,
+      client.platform,
+      'desktop' // deviceFamily
+    ].join('|');
     
     console.log("[IDENTITY] Signing Proof:", payload);
     

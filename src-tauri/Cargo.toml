@@ -30,5 +30,6 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+url = "2"
 # native-tls and tokio-native-tls removed in favor of rustls
 http = "1"
