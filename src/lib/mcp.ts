@@ -40,20 +40,49 @@ export interface Transport {
  * WebSocket Transport
  */
 class WebSocketTransport implements Transport {
-  private socket: WebSocket;
+  private socket: WebSocket | null = null;
   private messageCallback?: (msg: any) => void;
+  private queue: any[] = [];
 
-  constructor(url: string) {
-    this.socket = new WebSocket(url);
+  constructor(private url: string) {
+    this.connect();
+  }
+
+  private connect() {
+    console.log(`[WS] Connecting to ${this.url}...`);
+    this.socket = new WebSocket(this.url);
+    
     this.socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (this.messageCallback) this.messageCallback(data);
+      try {
+        const data = JSON.parse(event.data);
+        if (this.messageCallback) this.messageCallback(data);
+      } catch (e) {
+        console.error("[WS] Failed to parse message:", event.data);
+      }
+    };
+
+    this.socket.onopen = () => {
+      console.log(`[WS] Connected to ${this.url}`);
+      while (this.queue.length > 0) {
+        const msg = this.queue.shift();
+        this.socket?.send(JSON.stringify(msg));
+      }
+    };
+
+    this.socket.onerror = (err) => {
+      console.error(`[WS] Connection error at ${this.url}:`, err);
+    };
+
+    this.socket.onclose = () => {
+      console.log(`[WS] Connection closed for ${this.url}`);
     };
   }
 
   async send(message: any) {
-    if (this.socket.readyState !== WebSocket.OPEN) {
-      await new Promise((resolve) => this.socket.onopen = resolve);
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      console.log("[WS] Queueing message (waiting for connection)...");
+      this.queue.push(message);
+      return;
     }
     this.socket.send(JSON.stringify(message));
   }
@@ -63,7 +92,7 @@ class WebSocketTransport implements Transport {
   }
 
   close() {
-    this.socket.close();
+    this.socket?.close();
   }
 }
 
@@ -209,11 +238,10 @@ class SSETransport implements Transport {
   constructor(private url: string, private headers: Record<string, string> = {}) {}
 
   async send(message: any) {
-    if (!this.endpoint) {
-      await this.connect();
-    }
-
-    const response = await fetch(this.endpoint!, {
+    // If no command endpoint discovered yet, use the initial URL as the POST target
+    const target = this.endpoint || this.url;
+    
+    const response = await fetch(target, {
       method: "POST",
       headers: { 
         "Content-Type": "application/json",
@@ -223,25 +251,39 @@ class SSETransport implements Transport {
     });
 
     if (!response.ok) {
-      throw new Error(`SSE Post failed: ${response.statusText}`);
+      const errorText = await response.text();
+      throw new Error(`SSE Post to ${target} failed: ${response.status} ${errorText}`);
+    }
+
+    // In some A2A implementations, the first POST response might contain the SSE endpoint or session ID
+    if (response.headers.get("X-SSE-Endpoint")) {
+      const sseUrl = response.headers.get("X-SSE-Endpoint")!;
+      if (!this.eventSource) this.connect(sseUrl);
     }
   }
 
-  private connect(): Promise<void> {
+  private connect(sseUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.eventSource = new EventSource(this.url);
+      console.log(`[SSE] Opening stream at ${sseUrl}...`);
+      this.eventSource = new EventSource(sseUrl);
       
-      this.eventSource.addEventListener("endpoint", (event: any) => {
-        this.endpoint = event.data;
-        resolve();
-      });
-
       this.eventSource.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (this.messageCallback) this.messageCallback(data);
+        try {
+          const data = JSON.parse(event.data);
+          if (this.messageCallback) this.messageCallback(data);
+        } catch (e) {
+          console.error("[SSE] Failed to parse event data:", event.data);
+        }
+      };
+
+      this.eventSource.onopen = () => {
+        console.log(`[SSE] Stream opened at ${sseUrl}`);
+        resolve();
       };
 
       this.eventSource.onerror = (err) => {
+        console.error(`[SSE] Stream error at ${sseUrl}:`, err);
+        this.eventSource?.close();
         reject(err);
       };
     });
@@ -249,6 +291,10 @@ class SSETransport implements Transport {
 
   onMessage(callback: (message: any) => void) {
     this.messageCallback = callback;
+    // Auto-initiate SSE if not already started (assuming the base URL carries the stream)
+    if (!this.eventSource) {
+      this.connect(this.url).catch(err => console.error("[SSE] Auto-connect failed:", err));
+    }
   }
 
   close() {

@@ -32,7 +32,14 @@ export class A2AManager {
    * Path: /.well-known/agent.json
    */
   static async discover(baseUrl: string): Promise<AgentCard | null> {
-    const cleanBase = baseUrl.replace(/\/$/, "");
+    let finalUrl = baseUrl.trim();
+    
+    // Normalize protocol: A2A cards are always fetched over HTTP(S)
+    if (finalUrl.startsWith("claw://")) finalUrl = finalUrl.replace("claw://", "http://");
+    if (finalUrl.startsWith("agent://")) finalUrl = finalUrl.replace("agent://", "http://");
+    if (!finalUrl.includes("://")) finalUrl = `http://${finalUrl}`;
+    
+    const cleanBase = finalUrl.replace(/\/$/, "");
     const wellKnownUrl = `${cleanBase}/.well-known/agent.json`;
     
     console.log(`[A2A] Probing for Agent Card at ${wellKnownUrl}...`);
@@ -44,7 +51,7 @@ export class A2AManager {
       });
       
       if (!response.ok) {
-        console.warn(`[A2A] Discovery failed at ${wellKnownUrl}: ${response.statusText}`);
+        console.warn(`[A2A] Discovery failed at ${wellKnownUrl}: ${response.status} ${response.statusText}`);
         return null;
       }
       
@@ -58,7 +65,7 @@ export class A2AManager {
       console.log(`[A2A] Discovered Agent: ${card.name} (v${card.version})`);
       return card;
     } catch (e) {
-      console.error(`[A2A] Discovery error:`, e);
+      console.error(`[A2A] Discovery error at ${wellKnownUrl}:`, e);
       return null;
     }
   }
