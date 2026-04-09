@@ -21,8 +21,10 @@ export interface AgentCard {
 
 export interface A2ATask {
   id: string;
+  sessionId?: string; // High-Fidelity Session Pairing
   status: "pending" | "running" | "completed" | "failed";
   progress?: number;
+  message?: any;
   artifact?: any;
 }
 

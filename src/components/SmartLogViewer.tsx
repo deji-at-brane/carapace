@@ -114,14 +114,11 @@ const LogItem: React.FC<{ entry: LogEntry }> = ({ entry }) => {
 };
 
 export const SmartLogViewer: React.FC<SmartLogViewerProps> = ({ logs, className }) => {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom using hard anchor
   useEffect(() => {
-    const scrollContainer = scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (scrollContainer) {
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    }
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [logs]);
 
   return (
@@ -140,7 +137,7 @@ export const SmartLogViewer: React.FC<SmartLogViewerProps> = ({ logs, className 
         </div>
       </div>
 
-      <ScrollArea className="flex-1" ref={scrollRef}>
+      <ScrollArea className="flex-1">
         <div className="flex flex-col">
           {logs.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 opacity-20 grayscale scale-90 pointer-events-none">
@@ -148,9 +145,12 @@ export const SmartLogViewer: React.FC<SmartLogViewerProps> = ({ logs, className 
               <p className="font-mono text-xs uppercase tracking-[0.2em]">Synchronizing neural link...</p>
             </div>
           ) : (
-            logs.map((log) => (
-              <LogItem key={log.id} entry={log} />
-            ))
+            <>
+              {logs.map((log) => (
+                <LogItem key={log.id} entry={log} />
+              ))}
+              <div ref={bottomRef} className="h-4" />
+            </>
           )}
         </div>
       </ScrollArea>

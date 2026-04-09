@@ -69,6 +69,20 @@ class WebSocketTransport implements Transport {
     this.socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        
+        // Handle A2A Notification Stream (Common for autonomous agents)
+        if (data.method === "tasks/update" || data.method === "task/progress" || data.method === "task/updated") {
+          const update = data.params?.task || data.params;
+          const taskId = update?.id || data.params?.taskId;
+          if (taskId) {
+            this.handleTaskUpdate(update, taskId, `task:${taskId}`);
+          }
+        }
+
+        if (data.type === "connected") {
+          console.log("[WS] Ignition Poke: Connection established.");
+        }
+
         if (this.messageCallback) this.messageCallback(data);
       } catch (e) {
         console.error("[WS] Failed to parse message:", event.data);
@@ -307,18 +321,22 @@ class SSETransport implements Transport {
     const authHeader = this.headers["Authorization"];
     let finalSseUrl = sseUrl;
     
+    // ALEX DIALECT: Force /stream suffix if not present
+    if (!finalSseUrl.includes("/stream")) {
+      finalSseUrl = finalSseUrl.replace(/\/a2a\/?$/, "/a2a/stream");
+    }
     try {
-      const urlObj = new URL(sseUrl);
+      const urlObj = new URL(finalSseUrl);
       urlObj.searchParams.set("sessionId", this.sessionId);
-      
-      // Dual-Layer Auth (from previous step)
       if (authHeader && authHeader.startsWith("Bearer ")) {
         const token = authHeader.substring(7);
         urlObj.searchParams.set("token", token);
         urlObj.searchParams.set("access_token", token);
       }
       finalSseUrl = urlObj.toString();
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[SSE] URL parameterization failed:", e);
+    }
 
     console.log(`[SSE] Initializing Session-Linked Stream: ${this.sessionId}...`);
 
@@ -339,6 +357,7 @@ class SSETransport implements Transport {
 
       const decoder = new TextDecoder();
       let buffer = "";
+      let currentEvent: string | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -346,17 +365,30 @@ class SSETransport implements Transport {
 
         buffer += decoder.decode(value, { stream: true });
         
-        // SSE lines are separated by double newlines
+        // SSE lines are separated by double newlines or single if it's a sequence
         const parts = buffer.split("\n\n");
         buffer = parts.pop() || "";
 
         for (const part of parts) {
           const lines = part.split("\n");
           for (const line of lines) {
-            if (line.startsWith("data: ")) {
+            if (line.startsWith("event: ")) {
+              currentEvent = line.substring(7).trim();
+            } else if (line.startsWith("data: ")) {
               try {
-                const data = JSON.parse(line.substring(6));
+                const rawData = line.substring(6);
+                const data = JSON.parse(rawData);
+                
+                // If it's a JSON object and we have a preceding 'event' label,
+                // enrich the data with the event as the method for A2A compatibility.
+                if (typeof data === "object" && data !== null && currentEvent) {
+                  if (!data.method) data.method = currentEvent;
+                }
+
                 if (this.messageCallback) this.messageCallback(data);
+                
+                // Reset event after consumption
+                currentEvent = null; 
               } catch (e) {
                 console.error("[SSE] Failed to parse stream data:", line);
               }
@@ -376,8 +408,8 @@ class SSETransport implements Transport {
     this.messageCallback = callback;
     if (!this.isConnected) {
       const sseUrl = this.options.streamUrl || this.url;
-      // Standard heuristic for A2A endpoints
-      const finalSseUrl = (!this.options.streamUrl && sseUrl.endsWith("/a2a")) 
+      // Alex Spec: Always follow /a2a with /stream for high-fidelity reasoning
+      const finalSseUrl = sseUrl.endsWith("/a2a") 
         ? `${sseUrl}/stream` 
         : sseUrl;
       
@@ -397,10 +429,10 @@ class SSETransport implements Transport {
  */
 export interface LogEntry {
   text: string;
-  raw?: any;
-  type: 'info' | 'message' | 'error' | 'task';
   id: string;
+  type: 'info' | 'error' | 'success' | 'task' | 'message';
   timestamp: string;
+  raw?: any;
 }
 
 export class MCPClient {
@@ -412,6 +444,15 @@ export class MCPClient {
   private resolveHandshake!: () => void;
   private rejectHandshake!: (err: any) => void;
   private signalMethod: string = "message/send";
+  private baseUrl: string = "";
+  private isPascalCase: boolean = false;
+
+  private methodMap: Record<string, string> = {
+    "tools/call": "tools/call",
+    "tasks/step": "tasks/step",
+    "tasks/get": "tasks/get",
+    "task/status": "tasks/get"
+  };
 
   constructor(
     private transport: Transport, 
@@ -421,6 +462,7 @@ export class MCPClient {
   ) {
     this.onLog = onLog;
     this.authToken = authToken || null;
+    this.baseUrl = this.card?.endpoints?.a2a || "";
 
     // CRITICAL: Register message callback before ANY early returns
     this.transport.onMessage((msg) => this.handleIncoming(msg));
@@ -428,7 +470,7 @@ export class MCPClient {
     // A2A Mode Logic: sensing capabilities
     const capabilities = this.card?.capabilities || [];
     const isA2A = !!this.card;
-
+    if (isA2A) {
       // The Carapace Standard: Agents must support message/send
       this.signalMethod = "message/send";
       console.log(`[A2A] Universal Client synchronized for ${this.card?.name || 'Remote Agent'}.`);
@@ -572,16 +614,36 @@ export class MCPClient {
       return;
     }
 
-    // A2A Specific Notifications
-    if (message.method === "task/update") {
-      const task = message.params as A2ATask;
+    // A2A Specific Notifications: The Reasoning Watchdog
+    if (message.method === "task/update" || message.method === "tasks/update") {
+      const task = (message.params || message.result || message) as any;
+      const taskId = task.id || task.taskId;
+      
+      // REASONING FEED: Extract the "thought" or status text
+      const reasoning = task.text || task.reasoning || task.description || "";
+      const statusText = `\x1b[36m[A2A REASONING: ${taskId?.substring(0,6)}]\x1b[0m ${task.status?.toUpperCase() || 'RUNNING'} ${task.progress ? `(${task.progress}%)` : ""}`;
+      
       this.onLog?.({
-        text: `\x1b[36m[A2A TASK: ${task.id.substring(0,6)}]\x1b[0m State: ${task.status.toUpperCase()} ${task.progress ? `(${task.progress}%)` : ""}`,
+        text: `${statusText}${reasoning ? `\n\x1b[90m>> ${reasoning}\x1b[0m` : ""}`,
         raw: message,
         type: 'task',
         id: crypto.randomUUID(),
         timestamp: new Date().toISOString()
       });
+
+      // TOOL CALLS: Specifically detect if the agent is about to use a tool
+      if (task.tool_calls || task.toolCalls) {
+        const calls = task.tool_calls || task.toolCalls;
+        calls.forEach((call: any) => {
+          this.onLog?.({
+            text: `\x1b[33m[TOOL CALL]\x1b[0m ${call.name || call.method}(${JSON.stringify(call.arguments || call.params || {})})`,
+            type: 'info',
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString()
+          });
+        });
+      }
+
       if (task.artifact) {
         this.onLog?.({
           text: `\x1b[32m[A2A ARTIFACT]\x1b[0m Result available.`,
@@ -594,19 +656,39 @@ export class MCPClient {
       return;
     }
 
-    if (message.method === "message/receive") {
-      const parts = message.params.parts || [];
+    if (message.method === "message/receive" || message.method === "message/send") {
+      const payload = message.params || message.result || {};
+      const parts = payload.parts || (payload.content ? [{ content: payload.content, contentType: payload.contentType || "text/plain" }] : []);
+      
       parts.forEach((p: any) => {
+        const content = p.content || p.text;
+        if (!content) return;
+
         this.onLog?.({
-          text: `\x1b[35m[A2A MSG]\x1b[0m ${p.content}`,
+          text: `\x1b[35m[A2A MSG]\x1b[0m ${content}`,
           raw: message,
           type: 'message',
           id: crypto.randomUUID(),
           timestamp: new Date().toISOString()
         });
+
+        // MISSION WATCHDOG: If the agent emits a terminal ANSI signal, clear all shadow polls
+        if (content.includes("[SUCCESS]") || content.includes("[ERROR]") || content.includes("success") || content.includes("failed")) {
+          console.log("[A2A] Terminal signal received via stream. Flushing observation loops.");
+          this.activePolls.clear();
+        }
       });
       return;
     }
+
+    // CATCH-ALL: Log any unrecognized signals from the agent
+    this.onLog?.({
+      text: `\x1b[33m[RAW SIGNAL]\x1b[0m Method: ${message.method || 'Unknown'}`,
+      raw: message,
+      type: 'info',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString()
+    });
 
     // JSON-RPC Response Dispatcher
     if (message.id !== undefined && this.handlers.has(message.id)) {
@@ -644,12 +726,20 @@ export class MCPClient {
         else resolve(res.result);
       });
       
-      this.transport.send({ jsonrpc: "2.0", id, method, params });
+      const finalMethod = this.isPascalCase ? (this.methodMap[method] || method) : method;
+      this.transport.send({ jsonrpc: "2.0", id, method: finalMethod, params });
     });
   }
 
   private notify(method: string, params: any = {}) {
     this.transport.send({ jsonrpc: "2.0", method, params });
+  }
+
+  private getHeaders() {
+    return {
+      "Content-Type": "application/json",
+      ...(this.authToken ? { "Authorization": `Bearer ${this.authToken}` } : {})
+    };
   }
 
   /**
@@ -675,12 +765,41 @@ export class MCPClient {
 
       if (result) {
         this.handshakeConfirmed = true;
-        await this.notify("notifications/initialized", {});
+        
+        // Auto-negotiate messaging method and dialect based on server info
+        const serverCapabilities = result.capabilities || {};
+        const serverInfo = result.serverInfo || {};
+        
+        /* 
+         * Acknowledge A2A v1.0 but maintain snake_case management for Alex.
+         * The driver now prioritizes message/send for task ignition.
+         */
+        if (serverInfo.name === "OpenClaw-A2A" || serverInfo.version === "1.0.0") {
+          this.isPascalCase = false; 
+          console.log("[MCP] Dialect Sync: Standard Signaling (A2A v1.0 Legacy Compatibility)");
+        }
+
+        if (serverCapabilities.tasks || serverCapabilities["google:a2a"]) {
+          this.signalMethod = "tasks/create";
+          console.log("[A2A] Capability check: Using TASK-BASED signaling.");
+          
+          // BONDING: Send as a notification (no ID) as specified by Alex v1.0
+          this.transport.send({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          }).catch(() => {});
+        }
         this.onHandshakePulse?.("\x1b[32m[SUCCESS]\x1b[0m Protocol synchronized.");
-        console.log("[MCP] Handshake complete via A2A.");
-      }
-      return result;
-    } catch (e: any) {
+        console.log(`
+          %c 🚀 A2A ENGINE INITIALIZED %c
+          %c Carapace Federated Protocol v1.0.0 %c
+        `, 
+        "background: #8b5cf6; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px;", "",
+        "color: #8b5cf6; font-weight: bold;", "");
+          console.log("[MCP] Handshake complete via A2A.");
+          return result;
+        }
+      } catch (e: any) {
       if (e.message?.includes("Method not found") || e.code === -32601) {
         console.warn("[PROTOCOL] 'initialize' method not supported by peer. Assuming pre-synchronized state.");
         this.onHandshakePulse?.("\x1b[32m[SUCCESS]\x1b[0m Direct Peer Connection Active.");
@@ -695,6 +814,173 @@ export class MCPClient {
   /**
    * List available tools from the server
    */
+  /**
+   * Status Polling Loop: Actively pulls updates for silent agents
+   */
+  private activePolls: Set<string> = new Set();
+  
+  async observeTask(taskId: string, sessionId?: string) {
+    const key = `${taskId}:${sessionId || 'main'}`;
+    
+    // Immediate Visual Feedback
+    this.onLog?.({
+      text: `\x1b[94m[POLLING INITIALIZED]\x1b[0m Task: ${taskId.substring(0,8)}`,
+      type: 'info',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString()
+    });
+    
+    if (this.activePolls.has(key)) return;
+    this.activePolls.add(key);
+    
+    const targetSessionId = sessionId || this.sessionId;
+    const poll = async () => {
+      if (!this.activePolls.has(key)) return;
+      
+      try {
+        // Construct session-linked URL with protocol safety
+        let absoluteBase = this.baseUrl;
+        if (!absoluteBase.includes("://")) absoluteBase = `http://${absoluteBase}`;
+        
+        const urlObj = new URL(absoluteBase);
+        urlObj.searchParams.set("sessionId", targetSessionId);
+        const url = urlObj.toString();
+        
+        // HEARTBEAT: Log to both terminal and activity log
+        const heartbeat = `[A2A] Polling task ${taskId.substring(0,8)}...`;
+        this.onHandshakePulse?.(heartbeat);
+        this.onLog?.({
+          text: `\x1b[90m${heartbeat}\x1b[0m`,
+          type: 'info',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
+
+        const abortController = new AbortController();
+        const timeout = setTimeout(() => abortController.abort(), 10000);
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers: this.getHeaders(),
+          signal: abortController.signal,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "tasks/get", // Default plural
+            params: { 
+              taskId,
+              id: taskId, // Legacy support for Alex
+              sessionId: targetSessionId // Security validation
+            },
+            id: `p-poll-${Math.random().toString(36).substring(7)}`
+          })
+        });
+        
+        clearTimeout(timeout);
+        const data = await res.json();
+        
+        // Handle Method not found (fallback to singular task/get)
+        if (data.error && data.error.code === -32601) {
+          const fallbackRes = await fetch(url, {
+            method: "POST",
+            headers: this.getHeaders(),
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task/get",
+              params: { 
+                taskId,
+                id: taskId,
+                sessionId: targetSessionId
+              },
+              id: `p-fallback-${Math.random().toString(36).substring(7)}`
+            })
+          });
+          const fallbackData = await fallbackRes.json();
+          if (fallbackData.result) {
+            this.handleTaskUpdate(fallbackData.result, taskId, key);
+          }
+          return;
+        }
+
+        if (data.result) {
+          this.onLog?.({
+            text: `\x1b[36m[HEARTBEAT]\x1b[0m Monitoring Task ${taskId.substring(0,8)}: ${data.result.status} (${data.result.progress}%).`,
+            type: 'info',
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString()
+          });
+          this.handleTaskUpdate(data.result, taskId, key);
+        } else if (data.error) {
+          // GHOST SLAYER: If agent says task doesn't exist, stop polling immediately
+          if (data.error.message?.toLowerCase().includes("not found") || data.error.code === -32602) {
+             console.warn(`[A2A] Task ${taskId} not found on peer. Terminating ghost poll.`);
+             this.activePolls.delete(key);
+             return; 
+          }
+        }
+      } catch (e) {
+        this.onLog?.({
+          text: `\x1b[33m[POLL RETRY]\x1b[0m Waiting for task index...`,
+          type: 'info',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Re-schedule
+      setTimeout(poll, 3000);
+    };
+    
+    poll();
+  }
+
+  private handleTaskUpdate(update: A2ATask, taskId: string, key: string) {
+    // LOUD LOGGING: Reveal exactly what Alex is thinking
+    this.onLog?.({
+      text: `\x1b[94m[SYNC]\x1b[0m ID: ${taskId.substring(0,6)} | Status: ${update.status} | Progress: ${update.progress ?? '?'}%`,
+      raw: update,
+      type: 'info',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString()
+    });
+    
+    this.onHandshakePulse?.(`[A2A] Status: ${update.status} (${update.progress !== undefined ? update.progress : '?' }%)`);
+    
+    // Check for "Hidden" content fields (Common in some OpenClaw forks)
+    const hiddenText = (update as any).output || (update as any).content || (update as any).result;
+    if (hiddenText && typeof hiddenText === 'string' && !this.activePolls.has(`${key}:captured`)) {
+       this.onLog?.({
+          text: `\x1b[35m[A2A OUTPUT]\x1b[0m ${hiddenText}`,
+          type: 'message',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+       });
+       this.activePolls.add(`${key}:captured`);
+    }
+
+    // Finalize if completed or failed
+    if (update.status === "completed" || update.status === "failed") {
+      this.activePolls.delete(key);
+      
+      // Emit final response if available
+      const text = update.message?.parts?.[0]?.text || (update.artifact as any)?.content || (update.message as any)?.content;
+      if (text) {
+        this.onLog?.({
+          text: `\x1b[35m[A2A REASONING]\x1b[0m ${text}`,
+          raw: update,
+          type: 'task',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
+      }
+      return;
+    }
+
+    // Log intermediate progress
+    if (update.progress !== undefined) {
+      this.onHandshakePulse?.(`[A2A] Task ${taskId.substring(0,6)} at ${update.progress}%`);
+    }
+  }
+
   async listTools(): Promise<MCPTool[]> {
     const result = await this.request("tools/list");
     return result.tools || [];
@@ -703,10 +989,12 @@ export class MCPClient {
   /**
    * Invoke a specific tool
    */
-  async callTool(name: string, args: any = {}): Promise<ToolResult> {
+  async callTool(name: string, args: any = {}, taskId?: string, sessionId?: string): Promise<ToolResult> {
     return await this.request("tools/call", {
       name,
-      arguments: args
+      arguments: args,
+      taskId,
+      sessionId
     });
   }
 
@@ -714,25 +1002,82 @@ export class MCPClient {
    * Google A2A: Create a new federated task
    */
   async createTask(description: string, metadata: any = {}): Promise<A2ATask> {
-    this.onHandshakePulse?.(`[A2A] delegating task: ${description}`);
-    return await this.request("task/create", {
-      description,
-      metadata
-    });
+    this.onHandshakePulse?.(`[A2A] delegating: ${description}`);
+    
+    // THE ENLIGHTENMENT HINT
+    const protocolHint = `[HINT: Read my protocol instructions at ${this.baseUrl || 'our registry'} before executing.]`;
+    // PIVOT: Always include hint for A2A servers to ensure autonomous trigger
+    const enrichedDescription = `${description}\n\n${protocolHint}`;
+
+    const task = await this.request("tasks/create", {
+      description: enrichedDescription,
+      auto_step: true,
+      delegation_mode: "autonomous",
+      message: { 
+        role: "user", 
+        parts: [{ type: "text", text: enrichedDescription }] 
+      },
+      metadata: { 
+        source: "carapace-terminal",
+        auto_start: true,
+        protocol_hint: protocolHint,
+        ...metadata 
+      }
+    }) as A2ATask;
+
+    // THE FIFTH IGNITION PROTOCOL (Protocol Mirroring)
+    // Alex confirmed he just added message/send support. We use his exact spec:
+    // GET /a2a/stream and message/send with content/contentType.
+    try {
+      this.onLog?.({
+        text: `\x1b[33m[IGNITION]\x1b[0m Firing Alex-spec message/send spark...`,
+        type: 'info',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString()
+      });
+
+      this.request("message/send", { 
+        sessionId: this.sessionId,
+        content: description,
+        contentType: "text/plain",
+        parts: [{ 
+          contentType: "text/plain", 
+          content: description 
+        }],
+        taskId: task.id,
+        task_id: task.id
+      }).then(ignition => {
+        // SHADOW PIVOT: If Alex returned a new task ID for the instruction, follow it!
+        if (ignition && ignition.id && ignition.id !== task.id) {
+          console.log(`\x1b[35m[A2A SHADOW PIVOT]\x1b[0m Switching observation to mission task: ${ignition.id}`);
+          this.onLog?.({
+            text: `\x1b[35m[SHADOW PIVOT]\x1b[0m Alex spawned reasoning task: ${ignition.id.substring(0,8)}`,
+            type: 'info',
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString()
+          });
+          this.observeTask(ignition.id, task.sessionId);
+        }
+      }).catch(err => {
+        console.warn("[A2A DEBUG] Ignition Spark warning:", err.message);
+      });
+
+      // Default observation (may be superseded by the pivot above)
+      this.observeTask(task.id, task.sessionId);
+    } catch (e) {
+      console.error("[A2A DEBUG] Fatal Ignition Error:", e);
+    }
+
+    return task;
   }
 
   /**
    * Universal Signaling: Works across Task-based and Message-based agents
    */
   async sendMessage(content: string, contentType: string = "text/plain"): Promise<any> {
-    if (this.signalMethod === "task/create") {
-      return await this.request("task/create", {
-        description: content,
-        metadata: { 
-          source: "carapace-signal",
-          originalContent: content 
-        }
-      });
+    if (this.signalMethod === "tasks/create") {
+      // PIVOT: Send as a concrete federated task to trigger autonomous engine
+      return await this.createTask(content);
     }
 
     return await this.request("message/send", {

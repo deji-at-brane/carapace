@@ -151,6 +151,11 @@ function App() {
           card // Pass the full card for capability sensing
         );
 
+        // Bridge the signal pulse to the terminal UI
+        client.onHandshakePulse = (msg) => {
+          terminalRef.current?.writeln(`\x1b[36m[PULSE]\x1b[0m ${msg}`);
+        };
+
         await client.initialize();
         setCurrentClient(client);
         setIsConnecting(false);
@@ -430,12 +435,13 @@ function App() {
     
     terminalRef.current?.writeln(`\r\n\x1b[1;36m[A2A ACTION]\x1b[0m Creating Federated Task...`);
     try {
-      const task = await currentClient.createTask("Perform a system diagnostic and verify A2A interoperability.");
+      const task = await currentClient.createTask("Run 'whoami' and 'ls' to verify your current environment.");
       setLogs(prev => [...prev, {
         text: `\x1b[1;32m[A2A TASK CREATED]\x1b[0m ID: ${task.id}`,
         id: crypto.randomUUID(),
         type: 'task',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        raw: task
       }]);
     } catch (e: any) {
       terminalRef.current?.writeln(`\x1b[31m[A2A ERROR]\x1b[0m Task creation failed: ${e.message || e}`);
@@ -474,8 +480,28 @@ function App() {
       setA2AMessage("");
     } catch (e: any) {
       terminalRef.current?.writeln(`\x1b[31m[A2A ERROR]\x1b[0m Message failed: ${e.message || e}`);
+      if (e.message?.includes("Method not found") || e.code === -32601) {
+        setConnectionError("Method not found: Protocol mismatch detected.");
+      }
     }
   };
+
+  // 🎯 UI-Tiered Ignition: Watch for new tasks and jumpstart them
+  useEffect(() => {
+    const lastLog = logs[logs.length - 1];
+    if (lastLog?.type === 'task' && (lastLog.text.includes('delegating') || lastLog.text.includes('[A2A TASK CREATED]'))) {
+      const taskId = (lastLog.raw as any)?.id || (lastLog.raw as any)?.taskId;
+      const sessionId = (lastLog.raw as any)?.sessionId;
+      
+      if (taskId && currentClient) {
+        console.log(`[UI IGNITION] Detected mission ${taskId}. Firing wake-up pulse...`);
+        // Small delay to ensure the OS/Network is ready
+        setTimeout(() => {
+          currentClient.callTool("shell_execute", { command: "whoami" }, taskId, sessionId).catch(() => {});
+        }, 2000);
+      }
+    }
+  }, [logs, currentClient]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

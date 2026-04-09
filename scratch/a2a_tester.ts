@@ -1,60 +1,86 @@
-/**
- * A2A FLAT-NAMESPACE PROBE
- * Probing for non-namespaced "Simple" methods.
- */
-
-const TARGET_IP = "148.230.87.184";
-const PORT = "18889";
+const TARGET = "http://148.230.87.184:18889/a2a";
 const TOKEN = "de54f9bd7501b494b180d2867bbfebe727eb380c62e23eb0cd2ea4322baf43a1";
-const BASE_URL = `http://${TARGET_IP}:${PORT}`;
 
-async function runTest() {
-  console.log(`\n🚀 Starting Flat Namespace Probe for ${BASE_URL}...`);
-  const sessionId = `flat-${Date.now()}`;
+async function runProbe() {
+  console.log("🚀 Starting A2A v1.0 Exhaustive Probe...");
 
-  const sendRequest = async (label: string, method: string, params: any) => {
-    console.log(`\n[PROBE] ${label} (${method})...`);
-    try {
-      const res = await fetch(`${BASE_URL}/a2a?sessionId=${sessionId}`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${TOKEN}`,
-          "Content-Type": "application/json"
+  try {
+    const initRes = await fetch(TARGET, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "probe", version: "1.0.0" }
         },
+        id: 100
+      })
+    });
+    const initData = await initRes.json();
+    console.log(`\n🧪 initialize: ${JSON.stringify(initData).substring(0, 150)}`);
+
+    console.log("\n🧪 Verifying tasks/create...");
+    const taskRes = await fetch(TARGET, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tasks/create",
+        params: { description: "Probe Task" },
+        id: 200
+      })
+    });
+    const taskData = await taskRes.json();
+    const taskId = taskData.result?.id;
+    const sessionId = taskData.result?.sessionId;
+    console.log(`   [RESPONSE] taskId: ${taskId}, sessionId: ${sessionId}`);
+
+    if (!taskId) return;
+
+    const methods = [
+      "task/create",
+      "task/execute",
+      "task/step",
+      "task/message",
+      "task/messages/create",
+      "task/input",
+      "task/get",
+      "tasks/execute",
+      "tasks/get",
+      "task/update"
+    ];
+
+    for (const method of methods) {
+      console.log(`\n🧪 Probing: ${method}...`);
+      const res = await fetch(TARGET, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}` },
         body: JSON.stringify({
           jsonrpc: "2.0",
-          method,
-          params,
-          id: `p-${Math.random().toString(36).substring(7)}`
+          method: method,
+          params: {
+            taskId: taskId,
+            sessionId: sessionId,
+            task_id: taskId,
+            name: "shell_execute",
+            arguments: { command: "whoami" }
+          },
+          id: 999
         })
       });
-      const body = await res.text();
-      console.log(`Status: ${res.status}`);
-      console.log(`Response: ${body}`);
-      return !body.includes("-32601");
-    } catch (e: any) {
-      console.error(`Error: ${e.message}`);
-      return false;
+      const data = await res.json();
+      console.log(`   [RESPONSE] ${JSON.stringify(data).substring(0, 150)}`);
+      if (data.result && !data.error) {
+        console.log(`   🌟 WINNING v1.0 METHOD DETECTED: ${method}`);
+        break;
+      }
     }
-  };
-
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-  const flatProbes = [
-    { label: "Simple Message", method: "message", params: { text: "Hello from Flat Probe" } },
-    { label: "Simple Chat", method: "chat", params: { content: "Hello" } },
-    { label: "Simple Signal", method: "signal", params: { input: "Hello" } },
-    { label: "Simple Task", method: "task", params: { description: "Hello" } },
-    { label: "Tool Invoke (ACP Style)", method: "tools/invoke", params: { name: "web_search", arguments: { query: "test" } } },
-    { label: "Simple Initialize", method: "initialized", params: {} }
-  ];
-
-  for (const p of flatProbes) {
-    await sendRequest(p.label, p.method, p.params);
-    await sleep(1500);
+  } catch (e) {
+    console.error(`❌ Probe Error: ${e.message}`);
   }
-
-  process.exit(0);
 }
 
-runTest();
+runProbe();
