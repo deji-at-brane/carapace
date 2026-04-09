@@ -15,7 +15,9 @@ import { Agent } from "@/lib/types";
 import { ToolDrawer } from "@/components/ToolDrawer";
 import { PairingOverlay, PairingStep } from "@/components/PairingOverlay";
 import { TerminalCanvas, TerminalHandle } from "@/components/TerminalCanvas";
-import { MCPClient, createTransport, MCPTool, parseAgentUri, ClawPairingManager } from "@/lib/mcp";
+import { SmartLogViewer } from "@/components/SmartLogViewer";
+import { MCPClient, createTransport, MCPTool, parseAgentUri, LogEntry } from "@/lib/mcp";
+import { A2AManager, AgentCard } from "@/lib/a2a";
 import { CarapaceDB } from "@/lib/db";
 import { cn } from "@/lib/utils";
 import "./App.css";
@@ -35,9 +37,12 @@ function App() {
   const [pairingTask, setPairingTask] = useState<{ active: boolean; error: string | null } | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [activeCard, setActiveCard] = useState<AgentCard | null>(null);
   const [customClientId, setCustomClientId] = useState<string>('');
+  const [a2aMessage, setA2AMessage] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [currentPulse, setCurrentPulse] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const terminalRef = useRef<TerminalHandle>(null);
   const discoveryLock = useRef(false);
 
@@ -65,15 +70,34 @@ function App() {
       console.log(`[AUTH] Vault Search for ${hostKey}:`, savedToken ? "FOUND" : "NOT FOUND");
       terminalRef.current?.writeln(`\x1b[90m[AUTH] Identity: ${hostKey} [Vault: ${savedToken ? 'OK' : 'EMPTY'}]\x1b[0m`);
 
-      // Automation: If already paired, skip the overlay and connect immediately
+      // 🌐 NEW: Google A2A Discovery Step
+      terminalRef.current?.writeln(`\x1b[90m[A2A] Probing for Agent Card...\x1b[0m`);
+      const card = await A2AManager.discover(agent.uri);
+      
+      if (card) {
+        setActiveCard(card);
+        terminalRef.current?.writeln(`\x1b[1;32m[A2A] Discovered: ${card.name} (v${card.version})\x1b[0m`);
+        terminalRef.current?.writeln(`\x1b[90m[A2A] Capabilities: ${card.capabilities.join(", ")}\x1b[0m`);
+      } else {
+        setActiveCard(null);
+        terminalRef.current?.writeln(`\x1b[90m[A2A] No Agent Card found. Falling back to legacy pairing.\x1b[0m`);
+      }
+
+      // Automation: If already paired OR we have an A2A token, connect immediately
       const isAlreadyPaired = !!savedToken;
 
       if (isAlreadyPaired) {
         console.log(`[AUTO] Using existing credentials for ${hostKey}`);
-        terminalRef.current?.writeln(`\x1b[32m[SESSION] Restoring trusted connection to ${agent.name}...\x1b[0m`);
+        const sessionMsg = card ? `[A2A] Synchronizing federated session to ${card.name}...` : `[SESSION] Restoring trusted connection to ${agent.name}...`;
+        terminalRef.current?.writeln(`\x1b[32m${sessionMsg}\x1b[0m`);
         setIsConnecting(true);
+      } else if (card) {
+        // A2A First Contact: We found a card but no token. Show A2A Auth prompt.
+        terminalRef.current?.writeln(`\x1b[1;33m[A2A] Authentication Required.\x1b[0m Please provide a Bearer token for ${card.name}.`);
+        setIsConnecting(false);
+        return; // UI will handle the rest
       } else {
-        // First Contact Flow: Start the unified pairing process
+        // Legacy OpenClaw v3 Flow: Start the unified pairing process
         startClawPairing(agent.uri, agent);
         return;
       }
@@ -91,10 +115,16 @@ function App() {
           uriToken ? "TOKEN FROM URI" : dbToken ? "TOKEN FROM VAULT" : "NO TOKEN FOUND"
         );
 
-        const transport = createTransport(agent.uri); 
-        const client = new MCPClient(transport, (msg) => {
-          terminalRef.current?.writeln(`\x1b[33m${msg}\x1b[0m`);
-        }, savedToken || undefined);
+        const transport = createTransport(agent.uri, savedToken || undefined); 
+        const client = new MCPClient(
+          transport,
+          (entry) => {
+            terminalRef.current?.writeln(entry.text);
+            setLogs(prev => [...prev, entry]);
+          },
+          savedToken || undefined,
+          !!card // isA2A = true if card found
+        );
 
         await client.initialize();
         setCurrentClient(client);
@@ -114,7 +144,6 @@ function App() {
         await db.createSession(agent.name, agent.uri);
         
         terminalRef.current.writeln(`\r\n\x1b[1;32m[SUCCESS]\x1b[0m Handshake complete. Session active.`);
-        terminalRef.current.write("\r\n\x1b[1;35m$\x1b[0m ");
 
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : "Handshake timed out or failed.";
@@ -371,18 +400,51 @@ function App() {
     }
   };
 
+  const handleCreateA2ATask = async () => {
+    if (!currentClient || !activeCard) return;
+    
+    terminalRef.current?.writeln(`\r\n\x1b[1;36m[A2A ACTION]\x1b[0m Creating Federated Task...`);
+    try {
+      const task = await currentClient.createTask("Perform a system diagnostic and verify A2A interoperability.");
+      setLogs(prev => [...prev, {
+        text: `\x1b[1;32m[A2A TASK CREATED]\x1b[0m ID: ${task.id}`,
+        id: crypto.randomUUID(),
+        type: 'task',
+        timestamp: new Date().toISOString()
+      }]);
+    } catch (e: any) {
+      terminalRef.current?.writeln(`\x1b[31m[A2A ERROR]\x1b[0m Task creation failed: ${e.message || e}`);
+    }
+  };
+
+  const handleSendA2AMessage = async (overrideText?: string) => {
+    if (!currentClient || !activeCard) return;
+
+    const messageToSend = overrideText || a2aMessage.trim() || "Hello from Carapace! This is an A2A federated signal.";
+    terminalRef.current?.writeln(`\r\n\x1b[1;36m[A2A ACTION]\x1b[0m Sending Peer Message...`);
+    try {
+      await currentClient.sendMessage(messageToSend);
+      setLogs(prev => [...prev, {
+        text: `\x1b[1;32m[A2A MSG SENT]\x1b[0m Content: "${messageToSend.substring(0, 30)}${messageToSend.length > 30 ? '...' : ''}"`,
+        id: crypto.randomUUID(),
+        type: 'message',
+        timestamp: new Date().toISOString()
+      }]);
+      setA2AMessage("");
+    } catch (e: any) {
+      terminalRef.current?.writeln(`\x1b[31m[A2A ERROR]\x1b[0m Message failed: ${e.message || e}`);
+    }
+  };
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
     const setupDeepLink = async () => {
-      // ONE-TIME PURGE: Clean up any corrupted 'localhost' state from previous failed attempts
       try {
         const db = await CarapaceDB.getInstance();
-        await db.execute("DELETE FROM agents WHERE uri LIKE '%localhost%' OR uri LIKE '%127.0.0.1%'");
-        await db.execute("DELETE FROM credentials WHERE agent_host LIKE '%localhost%' OR agent_host LIKE '%127.0.0.1%'");
-        console.log("[STORAGE] Purged stale localhost sessions.");
+        console.log("[STORAGE] Database initialized. Local A2A Mocking enabled.");
       } catch (e) {
-        console.warn("[STORAGE] Purge failed (likely fresh install):", e);
+        console.warn("[STORAGE] DB Init failed:", e);
       }
 
       try {
@@ -558,16 +620,20 @@ function App() {
                   <div className="absolute inset-0 z-10 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
                     <div className="max-w-md w-full bg-[#1a1a1a] border border-orange-900/30 rounded-lg p-6 shadow-2xl animate-in fade-in zoom-in duration-300">
                       <div className="flex items-center gap-4 mb-4">
-                        <div className="p-3 bg-orange-900/20 rounded-full">
-                          <ShieldCheck className="w-8 h-8 text-orange-500" />
+                        <div className={cn("p-3 rounded-full", activeCard ? "bg-primary/20" : "bg-orange-900/20")}>
+                          {activeCard ? <Zap className="w-8 h-8 text-primary" /> : <ShieldCheck className="w-8 h-8 text-orange-500" />}
                         </div>
                         <div>
-                          <h2 className="text-xl font-bold">Authentication Required</h2>
-                          <p className="text-gray-400 text-sm">To establish a secure channel to {selectedAgent.name}, you must first pair or connect your local terminal.</p>
+                          <h2 className="text-xl font-bold">{activeCard ? "Federated Authentication" : "Authentication Required"}</h2>
+                          <p className="text-gray-400 text-sm">
+                            {activeCard 
+                              ? `Enter a Bearer token to synchronize with ${activeCard.name}.` 
+                              : `To establish a secure channel to ${selectedAgent.name}, you must first pair your terminal.`}
+                          </p>
                         </div>
                       </div>
                       
-                      {((selectedAgent as any).is_paired > 0 || (selectedAgent as any).is_known) ? (
+                      {((selectedAgent as any).is_paired > 0 || (selectedAgent as any).is_known) && !activeCard ? (
                         <div className="space-y-4">
                           <button 
                             onClick={() => handleConnect(selectedAgent)}
@@ -580,7 +646,9 @@ function App() {
                       ) : (
                         <div className="space-y-4">
                           <div className="bg-black/40 p-3 rounded-md border border-white/5">
-                            <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">Paste Setup Code / URI</label>
+                            <label className="text-[10px] uppercase font-bold text-gray-500 mb-2 block">
+                              {activeCard ? "Bearer Token / Service Key" : "Paste Setup Code / URI"}
+                            </label>
                             <input 
                               type="text"
                               value={modalToken}
@@ -588,32 +656,83 @@ function App() {
                                 setModalToken(e.target.value);
                                 if (connectionError) setConnectionError(null);
                               }}
-                              placeholder="claw://148.230.87.184:18789?token=..."
-                              className="w-full bg-[#0a0a09] border border-[#2a2a24] rounded px-3 py-2 text-xs font-mono focus:border-orange-500/50 outline-none transition-colors"
+                              placeholder={activeCard ? "Enter A2A token..." : "claw://148.230.87.184:18789?token=..."}
+                              className="w-full bg-[#0a0a09] border border-[#2a2a24] rounded px-3 py-2 text-xs font-mono focus:border-primary/50 outline-none transition-colors"
                             />
                           </div>
                           <button 
-                            onClick={() => {
+                            onClick={async () => {
                               const target = modalToken.trim() || selectedAgent.uri;
-                              startClawPairing(target, selectedAgent);
+                              if (activeCard) {
+                                // A2A Direct Auth flow: Save token and connect
+                                const db = await CarapaceDB.getInstance();
+                                const parsed = parseAgentUri(selectedAgent.uri);
+                                const hostKey = parsed?.normalizedHost || selectedAgent.uri;
+                                await db.saveCredential(hostKey, modalToken.trim());
+                                handleConnect(selectedAgent);
+                              } else {
+                                startClawPairing(target, selectedAgent);
+                              }
                               setModalToken("");
                             }}
-                            className="w-full bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 rounded-md transition-colors shadow-lg flex items-center justify-center gap-2"
+                            className={cn(
+                              "w-full text-white font-bold py-3 rounded-md transition-all shadow-lg flex items-center justify-center gap-2",
+                              activeCard ? "bg-primary hover:bg-primary/80" : "bg-orange-600 hover:bg-orange-500"
+                            )}
                           >
                             <Zap className="w-5 h-5" />
-                            Pair New Agent
+                            {activeCard ? "Synchronize Agent" : "Pair New Agent"}
                           </button>
-                          <p className="text-[10px] text-center text-gray-600">You can get this code from Alex by asking for a "Setup Code".</p>
+                          <p className="text-[10px] text-center text-gray-600">
+                            {activeCard 
+                              ? "A2A uses standard bearer authentication for federation." 
+                              : "You can get this code from Alex by asking for a 'Setup Code'."}
+                          </p>
                         </div>
                       )}
                     </div>
                   </div>
                 )}
 
-              <div className="terminal-container flex-1 overflow-hidden">
-                <TerminalCanvas ref={terminalRef} />
+              <div className="terminal-container flex-1 overflow-hidden relative flex flex-col">
+                {activeCard ? (
+                  <SmartLogViewer logs={logs} className="flex-1" />
+                ) : (
+                  <TerminalCanvas ref={terminalRef} />
+                )}
+                
+                {activeCard && currentClient && (
+                  <div className="h-14 border-t border-[#2a2a24]/50 bg-black/60 flex items-center px-6 gap-4 z-10">
+                    <div className="flex-1 flex bg-white/5 border border-white/10 rounded-lg px-4 py-2 items-center gap-3 group focus-within:border-primary/40 transition-all">
+                      <MessageSquare size={16} className="text-gray-500 group-focus-within:text-primary transition-colors" />
+                      <input 
+                        type="text"
+                        value={a2aMessage}
+                        onChange={(e) => setA2AMessage(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSendA2AMessage()}
+                        placeholder="Enter federated message or command..."
+                        className="bg-transparent border-none outline-none text-xs flex-1 font-mono text-gray-200 placeholder:text-gray-600 transition-all"
+                      />
+                      <button 
+                         onClick={() => handleSendA2AMessage()}
+                         disabled={!a2aMessage.trim()}
+                         className="bg-primary/20 hover:bg-primary/30 text-primary text-[10px] uppercase font-bold px-4 py-1.5 rounded-md border border-primary/30 transition-all disabled:opacity-30"
+                      >
+                         Send Signal
+                      </button>
+                    </div>
+
+                    <button 
+                       onClick={handleCreateA2ATask}
+                       className="bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 text-[10px] font-bold px-4 py-2 rounded-md border border-blue-500/30 transition-all flex items-center gap-1.5"
+                    >
+                       <Zap size={14} /> CREATE TASK
+                    </button>
+                  </div>
+                )}
               </div>
-              <aside className="w-full border-t border-[#2a2a24]/50 bg-[#0f0f0d]/50 h-48 flex-shrink-0">
+              
+              <aside className="w-full border-t border-[#2a2a24]/50 bg-[#0f0f0d]/50 h-48 flex-shrink-0 relative">
                  <ToolDrawer 
                   tools={availableTools} 
                   onInvoke={handleInvokeTool} 
@@ -628,7 +747,7 @@ function App() {
           <div className="flex gap-6">
             <span className="flex items-center gap-2">
               <span className={cn("h-1.5 w-1.5 rounded-full shadow-[0_0_10px_rgba(var(--primary),1)]", currentClient ? "bg-primary animate-pulse" : "bg-[#2a2a24]")}></span> 
-              STATUS: {currentClient ? "ENCRYPTED" : "LISTENING"}
+              STATUS: {currentClient ? (activeCard ? "A2A FEDERATED" : "ENCRYPTED") : "LISTENING"}
             </span>
             {selectedAgent && <span className="opacity-40 uppercase truncate max-w-40">TARGET: {selectedAgent.uri}</span>}
           </div>

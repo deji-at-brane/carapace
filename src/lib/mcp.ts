@@ -3,6 +3,7 @@
  * Following MCP v1.0.0 (JSON-RPC 2.0)
  */
 import { invoke } from "@tauri-apps/api/core";
+import { A2ATask } from "./a2a";
 // import { Child, Command } from "@tauri-apps/plugin-shell";
 
 export interface MCPTool {
@@ -67,6 +68,137 @@ class WebSocketTransport implements Transport {
 }
 
 /**
+ * Mock Transport for local verification
+ */
+class MockTransport implements Transport {
+  private messageCallback?: (msg: any) => void;
+
+  constructor(private url: string) {
+    console.log(`[MOCK] Initialized for ${url}`);
+  }
+
+  async send(message: any) {
+    console.log(`[MOCK SEND]`, message);
+    
+    // Simulate a successful MCP/A2A initialization response
+    if (message.method === "initialize") {
+      setTimeout(() => {
+        this.messageCallback?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            protocolVersion: "2024-11-05",
+            capabilities: {
+              logging: {},
+              prompts: { listChanged: true },
+              resources: { subscribe: true, listChanged: true },
+              tools: { listChanged: true }
+            },
+            serverInfo: { name: "A2A-Mock-Server", version: "1.0.0" }
+          }
+        });
+      }, 500);
+    }
+
+    // Simulate tool listing
+    if (message.method === "tools/list") {
+      setTimeout(() => {
+        this.messageCallback?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            tools: [
+              {
+                name: "echo_signal",
+                description: "Verifies the multimodal relay by echoing back a signal.",
+                inputSchema: { type: "object", properties: { signal: { type: "string" } } }
+              },
+              {
+                name: "check_health",
+                description: "Performs a deep diagnostic of the local node registry.",
+                inputSchema: { type: "object" }
+              }
+            ]
+          }
+        });
+      }, 300);
+    }
+
+    // Simulate tool invocation
+    if (message.method === "tools/call") {
+      setTimeout(() => {
+        this.messageCallback?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            content: [{ type: "text", text: `[MOCK] Tool '${message.params.name}' executed successfully.` }],
+            isError: false
+          }
+        });
+      }, 500);
+    }
+
+    // Simulate peer messaging
+    if (message.method === "message/send") {
+      setTimeout(() => {
+        this.messageCallback?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { ok: true }
+        });
+
+        // Simulate an immediate peer response
+        setTimeout(() => {
+          this.messageCallback?.({
+            jsonrpc: "2.0",
+            method: "message/receive",
+            params: {
+              parts: [{ contentType: "text/plain", content: "Signal received, Carapace. Federated channel is clear." }]
+            }
+          });
+        }, 1000);
+      }, 200);
+    }
+
+    // Simulate task creation
+    if (message.method === "task/create") {
+      const taskId = `task-${Math.random().toString(36).substring(2, 8)}`;
+      setTimeout(() => {
+        this.messageCallback?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { id: taskId, status: "pending" }
+        });
+
+        // Trigger a fake A2A task update sequence
+        setTimeout(() => {
+          this.messageCallback?.({
+            jsonrpc: "2.0",
+            method: "task/update",
+            params: { id: taskId, status: "running", progress: 45 }
+          });
+        }, 2000);
+
+        setTimeout(() => {
+          this.messageCallback?.({
+            jsonrpc: "2.0",
+            method: "task/update",
+            params: { id: taskId, status: "completed", progress: 100, artifact: { type: "text", content: "Diagnostic successful. A2A logic expansion verified." } }
+          });
+        }, 4000);
+      }, 500);
+    }
+
+  }
+
+  onMessage(callback: (msg: any) => void) {
+    this.messageCallback = callback;
+  }
+
+  close() {}
+}
+
+/**
  * SSE (Server-Sent Events) Transport
  */
 class SSETransport implements Transport {
@@ -74,7 +206,7 @@ class SSETransport implements Transport {
   private endpoint: string | null = null;
   private messageCallback?: (msg: any) => void;
 
-  constructor(private url: string) {}
+  constructor(private url: string, private headers: Record<string, string> = {}) {}
 
   async send(message: any) {
     if (!this.endpoint) {
@@ -83,7 +215,10 @@ class SSETransport implements Transport {
 
     const response = await fetch(this.endpoint!, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        ...this.headers 
+      },
       body: JSON.stringify(message),
     });
 
@@ -122,25 +257,43 @@ class SSETransport implements Transport {
 }
 
 /**
- * Main MCP Client
+ * Universal MCP Client
+ * Handles protocol communication for both Legacy V3 (OpenClaw) and modern A2A Federated sessions.
  */
+export interface LogEntry {
+  text: string;
+  raw?: any;
+  type: 'info' | 'message' | 'error' | 'task';
+  id: string;
+  timestamp: string;
+}
+
 export class MCPClient {
   private messageId: number = 0;
   private handlers: Map<number | string, (res: MCPResponse) => void> = new Map();
-  private onHandshakePulse?: (msg: string) => void;
   private authToken: string | null = null;
-  
-  // Handshake Guard: Ensures MCP requests wait for the secure 'connect' layer
-  private handshakePromise: Promise<void>;
+  private onLog?: (entry: LogEntry) => void;
+  public handshakePromise: Promise<void>;
   private resolveHandshake!: () => void;
   private rejectHandshake!: (err: any) => void;
   private handshakeConfirmed: boolean = false;
 
-  constructor(private transport: Transport, onHandshakePulse?: (msg: string) => void, authToken?: string) {
-    this.onHandshakePulse = onHandshakePulse;
+  constructor(private transport: Transport, onLog?: (entry: LogEntry) => void, authToken?: string, isA2A: boolean = false) {
+    this.onLog = onLog;
     this.authToken = authToken || null;
 
-    // Initialize the handshake guard
+    // CRITICAL: Register message callback before ANY early returns
+    this.transport.onMessage((msg) => this.handleIncoming(msg));
+
+    // A2A Mode: Skip the OpenClaw v3 handshakes entirely.
+    if (isA2A) {
+      this.handshakePromise = Promise.resolve();
+      this.handshakeConfirmed = true;
+      console.log("[A2A] Client initialized in federated mode.");
+      return;
+    }
+
+    // Initialize the handshake guard for Legacy V3
     this.handshakePromise = new Promise((resolve, reject) => {
       this.resolveHandshake = () => {
         this.handshakeConfirmed = true;
@@ -159,9 +312,8 @@ export class MCPClient {
         }
       }, 1000);
     }
-
-    this.transport.onMessage((msg) => this.handleIncoming(msg));
   }
+
 
   private async handleIncoming(message: any) {
     // Debug Logging for Handshake Troubleshooting
@@ -212,23 +364,40 @@ export class MCPClient {
           }
         });
         
-        this.onHandshakePulse?.("[AUTH] Identity proof submitted.");
+        this.onLog?.({
+          text: "[AUTH] Identity proof submitted.",
+          type: 'info',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
       } catch (err) {
         this.rejectHandshake(err);
       }
       return;
     }
 
-    // HYBRID FALLBACK: If the message is a raw string or not matched by ID
-    if (typeof message === "string" || !message.id) {
+    // HYBRID FALLBACK: Only print raw if it's not a known JSON-RPC pattern or protocol message
+    const isProtocolPattern = message.method || message.id === "handshake-auth" || message.event;
+    if (!isProtocolPattern && (typeof message === "string" || !message.id)) {
       const text = typeof message === "string" ? message : JSON.stringify(message);
-      this.onHandshakePulse?.(text);
+      this.onLog?.({
+        text,
+        raw: typeof message === "object" ? message : null,
+        type: 'info',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString()
+      });
     }
 
     // JSON-RPC Response Dispatcher (Handle Handshake Confirmation)
     if (message.id === "handshake-auth") {
       if (message.ok) {
-        this.onHandshakePulse?.("[AUTH] Handshake Confirmed. Session Secure.");
+        this.onLog?.({
+          text: "[AUTH] Handshake Confirmed. Session Secure.",
+          type: 'info',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
         this.handshakeConfirmed = true;
         this.resolveHandshake();
       } else {
@@ -239,15 +408,61 @@ export class MCPClient {
         if (message.error?.code === "NOT_PAIRED" || error.includes("pairing required")) {
           const reqId = message.error?.details?.requestId;
           if (reqId) {
-            this.onHandshakePulse?.(`\x1b[1;33m[ACTION REQUIRED]\x1b[0m Pairing ID: ${reqId}`);
+            this.onLog?.({
+              text: `\x1b[1;33m[ACTION REQUIRED]\x1b[0m Pairing ID: ${reqId}`,
+              type: 'info',
+              id: crypto.randomUUID(),
+              timestamp: new Date().toISOString()
+            });
             this.rejectHandshake(new Error(`PAIRING_REQUIRED:${reqId}`));
             return;
           }
         }
 
-        this.onHandshakePulse?.(`\x1b[1;31m[AUTH ERROR]\x1b[0m ${error} (${details})`);
+        this.onLog?.({
+          text: `\x1b[1;31m[AUTH ERROR]\x1b[0m ${error} (${details})`,
+          type: 'error',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
         this.rejectHandshake(new Error(error));
       }
+      return;
+    }
+
+    // A2A Specific Notifications
+    if (message.method === "task/update") {
+      const task = message.params as A2ATask;
+      this.onLog?.({
+        text: `\x1b[36m[A2A TASK: ${task.id.substring(0,6)}]\x1b[0m State: ${task.status.toUpperCase()} ${task.progress ? `(${task.progress}%)` : ""}`,
+        raw: message,
+        type: 'task',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString()
+      });
+      if (task.artifact) {
+        this.onLog?.({
+          text: `\x1b[32m[A2A ARTIFACT]\x1b[0m Result available.`,
+          raw: task.artifact,
+          type: 'task',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
+      }
+      return;
+    }
+
+    if (message.method === "message/receive") {
+      const parts = message.params.parts || [];
+      parts.forEach((p: any) => {
+        this.onLog?.({
+          text: `\x1b[35m[A2A MSG]\x1b[0m ${p.content}`,
+          raw: message,
+          type: 'message',
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString()
+        });
+      });
       return;
     }
 
@@ -343,6 +558,38 @@ export class MCPClient {
       name,
       arguments: args
     });
+  }
+
+  /**
+   * Google A2A: Create a new federated task
+   */
+  async createTask(description: string, metadata: any = {}): Promise<A2ATask> {
+    this.onHandshakePulse?.(`[A2A] delegating task: ${description}`);
+    return await this.request("task/create", {
+      description,
+      metadata
+    });
+  }
+
+  /**
+   * Google A2A: Send a multimodal message
+   */
+  async sendMessage(content: string, contentType: string = "text/plain"): Promise<any> {
+    return await this.request("message/send", {
+      parts: [
+        {
+          contentType,
+          content: contentType === "application/json" ? JSON.parse(content) : content
+        }
+      ]
+    });
+  }
+
+  /**
+   * Google A2A: Get task status
+   */
+  async getTaskStatus(taskId: string): Promise<A2ATask> {
+    return await this.request("task/status", { taskId });
   }
 
   close() {
@@ -546,7 +793,7 @@ export class ClawPairingManager {
 /**
  * Transport Factory Helper
  */
-export function createTransport(uri: string): Transport {
+export function createTransport(uri: string, token?: string): Transport {
   let finalUri = uri;
   
   // Defensive: Handle raw IP or port-only URIs by assuming claw://
@@ -556,11 +803,22 @@ export function createTransport(uri: string): Transport {
 
   try {
     const url = new URL(finalUri);
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    // INTERCEPT: Local A2A Mock gets the MockTransport
+    if (url.host === "localhost:1425" && !finalUri.includes("claw://")) {
+      return new MockTransport(finalUri);
+    }
+
     if (url.protocol === "ws:" || url.protocol === "wss:") {
       return new WebSocketTransport(finalUri);
     }
     if (url.protocol === "http:" || url.protocol === "https:") {
-      return new SSETransport(finalUri);
+      // For HTTP/HTTPS, we use SSE transport with optional auth headers
+      return new SSETransport(finalUri, headers);
     }
     if (url.protocol === "claw:" || url.protocol === "agent:") {
       // Protocol normalization for WebSocket transport

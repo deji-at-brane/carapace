@@ -3,18 +3,18 @@ name: Carapace Workforce Integration
 description: Technical instructions for AI agents to securely pair with the Carapace desktop terminal via the OpenClaw v3 Protocol.
 ---
 
-# Carapace Agent Integration Skill
+# Carapace Agent Integration & A2A Skill
 
-This skill documents the **OpenClaw v3** handshake protocol. It ensures future AI agents can establish a secure, synchronized connection with the Carapace desktop terminal with zero friction.
+This skill documents the migration from the legacy OpenClaw v3 pairing handshake to the **Google Agent-to-Agent (A2A)** standard. It ensures AI agents can establish secure, interoperable collaborations with the Carapace workforce engine.
 
-## 1. Transport Strategy: Native Rust WebSocket
+## 1. Unified Interoperability (A2A)
 
-**Crucial Lesson**: The Carapace Browser UI cannot establish direct WebSocket connections to remote agents due to mandatory `Origin` and `CORS` headers enforced by the browser. 
+**Strategic Pivot**: Carapace has transitioned to the **Google A2A (Agent2Agent) Protocol** for primary agent federation. This treats the terminal as a **Client Agent** that interacts with **Remote Agents** over a standardized JSON-RPC 2.0 / SSE messaging tier.
 
-- **Implementation**: The terminal uses a **Native Rust Backend** (via Tauri) to initiate connections. 
-- **Benefit**: This allows the handshake to proceed without browser-enforced security blocks (e.g., `CONTROL_UI_ORIGIN_NOT_ALLOWED`).
+## 2. Handshake Specification (Legacy OpenClaw v3)
 
-## 2. Handshake Specification (JSON-RPC v3)
+> [!NOTE]
+> The OpenClaw v3 pairing flow is now considered a **Legacy/Direct Device** protocol. Use the A2A flow for standard workforce integration.
 
 All pairing requests must follow this exact schema. The Gateway validator is strict.
 
@@ -141,6 +141,26 @@ If the user or environment policy prohibits listening on `0.0.0.0`, the Agent sh
 ### 🏁 Cloudflare Tunnel (`cloudflared`)
 - **Strategy**: Outbound-only tunnel to a private domain.
 - **Instruction**: "Run `cloudflared tunnel` to map your local port to a domain. No ingress ports are required on your host."
+
+## 10. Google A2A Protocol (Agent2Agent)
+
+For modern agentic interoperability, Carapace implements the **A2A Open Standard**. This removes the need for manual device pairing in favor of automated agent federation.
+
+### 🏁 Identity Discovery (Agent Card)
+Agents should host a machine-readable **Agent Card** at the following location:
+- **Endpoint**: `https://{your_host}/.well-known/agent.json`
+- **Specification**: A JSON document describing the agent's name, capabilities, and A2A service endpoint.
+
+### 🏁 Authentication (Persistent Authorization)
+A2A connections utilize standard API / Service tokens.
+- **Header**: `Authorization: Bearer <your_agent_token>`
+- **Prerequisite**: Agents should provide this token to the user during their initial setup or as part of an A2A invitation.
+
+### 🏁 Task-Oriented Messaging
+A2A communication is built on top of **JSON-RPC 2.0** over **SSE (Server-Sent Events)**.
+- **Task Creation**: Use the `task/create` method to delegate work.
+- **Real-time Status**: Use SSE streams to push "Task Update" frames to Carapace.
+- **Artifacts**: Results should be returned as structured "Artifact" objects within the task lifecycle.
 
 ---
 *Last Updated: 2026-04-07 based on the Hostinger/Alex Integration Session.*

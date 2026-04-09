@@ -64,21 +64,27 @@ export class CarapaceDB {
     await this.seedAgents();
   }
 
-  private async seedAgents() {
-    console.log("Seeding discovery hub with default agents...");
+  async seedAgents() {
+    console.log("[DB] Synchronizing Discovery Hub agent registry...");
     const defaultAgents = [
-      { id: "alex-1", name: "Alex the Operator", description: "Operational gateway for OpenClaw at 148.230.87.184", uri: "claw://148.230.87.184:18789", category: "Production", icon: "ShieldCheck" },
-      { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "agent://research.carapace.io", category: "Research", icon: "Compass" },
-      { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "agent://code.carapace.io", category: "Development", icon: "Terminal" },
-      { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "agent://analysis.carapace.io", category: "Analysis", icon: "LayoutGrid" }
+      { id: "a2a-test-1", name: "A2A System Check", description: "Local federated agent for protocol verification.", uri: "http://localhost:1425", category: "Production", icon_name: "Zap" },
+      { id: "alex-1", name: "Alex the Operator", description: "Operational gateway for OpenClaw at 148.230.87.184", uri: "claw://148.230.87.184:18789", category: "Production", icon_name: "ShieldCheck" },
+      { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "agent://research.carapace.io", category: "Research", icon_name: "Compass" },
+      { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "agent://code.carapace.io", category: "Development", icon_name: "Terminal" },
+      { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "agent://analysis.carapace.io", category: "Analysis", icon_name: "LayoutGrid" }
     ];
 
     for (const agent of defaultAgents) {
-      await this.execute(
-        "REPLACE INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?)",
-        [agent.id, agent.name, agent.description, agent.uri, agent.category, agent.icon]
-      );
+      try {
+        await this.execute(
+          "REPLACE INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?)",
+          [agent.id, agent.name, agent.description, agent.uri, agent.category, agent.icon_name]
+        );
+      } catch (e) {
+        console.error(`[DB] Failed to seed agent ${agent.name}:`, e);
+      }
     }
+    console.log("[DB] Registry sync complete. Total agents:", defaultAgents.length);
   }
 
   async createSession(name: string, agentUri: string): Promise<string> {

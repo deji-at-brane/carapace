@@ -29,11 +29,10 @@ export const TerminalCanvas = forwardRef<TerminalHandle>((_, ref) => {
 
     // Initialize xterm.js instance
     const xterm = new Terminal({
-      cursorBlink: true,
+      cursorBlink: false,
       theme: {
-        background: "#000000",
-        foreground: "#ffffff",
-        cursor: "#50fa7b",
+        background: "#000000", // Total black
+        foreground: "#d1d1d1", // Soft white
         selectionBackground: "#44475a",
       },
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
@@ -55,23 +54,11 @@ export const TerminalCanvas = forwardRef<TerminalHandle>((_, ref) => {
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
-    // Welcome message
-    xterm.writeln("\x1b[1;32mCARAPACE VIRTUAL TERMINAL v0.1.0-alpha\x1b[0m");
+    // Welcome message (Clean Log Format)
+    xterm.writeln("\x1b[1;32mCARAPACE PROTOCOL ENGINE v0.1.0-alpha\x1b[0m");
     xterm.writeln("\x1b[90m--------------------------------------------------\x1b[0m");
-    xterm.writeln("\x1b[36mSTATUS:\x1b[0m Node initialized. Waiting for agent handshake...");
-    xterm.write("\r\n\x1b[1;35m$\x1b[0m ");
-
-    // Handle input (Mock echo)
-    xterm.onData((data) => {
-      // Handle backspace/enter
-      if (data === "\r") {
-        xterm.write("\r\n\x1b[1;35m$\x1b[0m ");
-      } else if (data === "\u007f") { // Backspace
-        xterm.write("\b \b");
-      } else {
-        xterm.write(data);
-      }
-    });
+    xterm.writeln("\x1b[36mSTATUS:\x1b[0m Ready for agentic session...");
+    xterm.writeln("");
 
     // Handle resize
     const resizeObserver = new ResizeObserver(() => {
@@ -84,6 +71,8 @@ export const TerminalCanvas = forwardRef<TerminalHandle>((_, ref) => {
       resizeObserver.disconnect();
     };
   }, []);
+
+
 
   return (
     <div 

@@ -1,0 +1,15 @@
+{
+  "name": "A2A Mock Agent",
+  "description": "A local federated agent testing the Google A2A discovery protocol.",
+  "version": "1.0.0",
+  "capabilities": ["text-processing", "file-management", "task-delegation"],
+  "endpoints": {
+    "a2a": "http://localhost:1425/api/a2a",
+    "mcp": "http://localhost:1425/api/mcp",
+    "sse": "http://localhost:1425/api/sse"
+  },
+  "auth": {
+    "type": "bearer",
+    "instructions": "Use any string as a token for this mock agent."
+  }
+}
