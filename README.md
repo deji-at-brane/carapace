@@ -41,15 +41,49 @@ Your data stays on your machine.
 # Install dependencies
 npm install
 
-# Start the dev server with Hot Module Replacement
+# Start the dev server (Vite + Tauri)
 npm run tauri dev
 ```
 
-### Production Build
+### Compilation & OS Specifics
+To package the application into a production executable, use the Tauri CLI:
+
+#### 🪟 Windows
+Ensure you have the [C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) installed.
 ```bash
-# Build the optimized binary
-npm run build
+npm run tauri build
 ```
+Generates `.msi` and `.exe` in `src-tauri/target/release/bundle/`.
+
+#### 🍎 macOS
+```bash
+npm run tauri build
+```
+Generates `.dmg` and `.app`.
+
+#### 🐧 Linux
+You must install the following system dependencies (Ubuntu/Debian):
+```bash
+sudo apt-get install libwebkit2gtk-4.0-dev \
+    build-essential \
+    curl \
+    wget \
+    file \
+    libssl-dev \
+    libgtk-3-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev
+```
+Then build:
+```bash
+npm run tauri build
+```
+
+## 🚀 CI/CD & Releases
+This repository is configured with **GitHub Actions** for automated multi-OS releases. Whenever a new tag (e.g., `v1.0.0`) is pushed, the system will:
+1. Spin up build runners for Windows, macOS, and Linux.
+2. Compile and package the app for all three platforms.
+3. Automatically create a **GitHub Release** and upload the installers.
 
 ## 🤖 For Agent Developers
 
