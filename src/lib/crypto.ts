@@ -5,6 +5,13 @@ import nacl from 'tweetnacl';
  * Manages the Ed25519 keypair for the Carapace Terminal.
  * Uses URL-Safe Base64 (RFC 4648) for compatibility with MiroFish gateways.
  */
+interface TerminalIdentity {
+  publicKey: string;
+  secretKey: Uint8Array;
+  keypair: nacl.SignKeyPair;
+  rawPublicKey: Uint8Array;
+}
+
 export class IdentityManager {
   private static STORAGE_KEY = 'carapace_terminal_identity';
 
@@ -15,7 +22,7 @@ export class IdentityManager {
   /**
    * Get or generate the terminal's identity keypair.
    */
-  static getIdentity() {
+  static getIdentity(): TerminalIdentity {
     const stored = localStorage.getItem(this.STORAGE_KEY);
     let secretKey: Uint8Array;
 

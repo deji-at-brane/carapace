@@ -6,7 +6,9 @@ import {
   MessageSquare,
   Compass,
   ShieldCheck,
-  Zap
+  Zap,
+  Activity,
+  BookOpen
 } from "lucide-react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { DiscoveryGrid } from "@/components/DiscoveryGrid";
@@ -15,8 +17,8 @@ import { Agent } from "@/lib/types";
 import { ToolDrawer } from "@/components/ToolDrawer";
 import { PairingOverlay, PairingStep } from "@/components/PairingOverlay";
 import { TerminalCanvas, TerminalHandle } from "@/components/TerminalCanvas";
-import { SmartLogViewer } from "@/components/SmartLogViewer";
-import { MCPClient, createTransport, MCPTool, parseAgentUri, LogEntry } from "@/lib/mcp";
+import { SettingsPane } from "@/components/SettingsPane";
+import { MCPClient, createTransport, MCPTool, parseAgentUri, LogEntry, ClawPairingManager } from "@/lib/mcp";
 import { A2AManager, AgentCard } from "@/lib/a2a";
 import { CarapaceDB } from "@/lib/db";
 import { cn } from "@/lib/utils";
@@ -43,8 +45,41 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [currentPulse, setCurrentPulse] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'activity' | 'security' | 'session' | 'guidance' | undefined>(undefined);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const discoveryLock = useRef(false);
+
+  const addLog = async (entry: LogEntry, forceShowInTerminal = false) => {
+     // ELITE FILTER: Only write high-value messages to the terminal
+     const isElite = 
+       forceShowInTerminal ||
+       entry.type === 'message' || 
+       entry.type === 'success' || 
+       entry.type === 'error' ||
+       entry.text.includes("[SUCCESS]") ||
+       entry.text.includes("[A2A SHADOW PIVOT]") ||
+       entry.text.includes("Handshake complete") ||
+       entry.text.includes("Discovered:");
+
+     if (isElite) {
+       terminalRef.current?.writeln(entry.text);
+     }
+     
+     // Always preserve everything for the forensic Activity Log (in Settings)
+     setLogs(prev => [...prev, entry]);
+
+     // 💾 PERSISTENCE: Save message to DB if session is active
+     if (currentSessionId) {
+       try {
+         const db = await CarapaceDB.getInstance();
+         await db.addMessage(currentSessionId, entry.type, entry.text, entry.raw);
+       } catch (e) {
+         console.warn("[DB] Failed to persist log entry:", e);
+       }
+     }
+  };
 
   const handleConnect = async (agent: Agent) => {
     // 🩺 Diagnostic Trace: Track the selection event
@@ -80,6 +115,26 @@ function App() {
       const parsed = parseAgentUri(agent.uri);
       const hostKey = parsed?.normalizedHost || agent.uri;
       
+      // Load most recent session for this agent to restore logs
+      const sessions = await db.select<any[]>("SELECT id FROM sessions WHERE agent_uri = ? ORDER BY created_at DESC LIMIT 1", [agent.uri]);
+      if (sessions.length > 0) {
+        const lastSessionId = sessions[0].id;
+        setCurrentSessionId(lastSessionId);
+        const historicalMessages = await db.getMessages(lastSessionId);
+        const mappedLogs: LogEntry[] = historicalMessages.map(m => ({
+          id: m.id,
+          type: m.role as any,
+          text: m.content,
+          timestamp: m.timestamp,
+          raw: m.metadata ? JSON.parse(m.metadata) : undefined
+        }));
+        setLogs(mappedLogs);
+        terminalRef.current?.writeln(`\x1b[90m[HISTORY] Restored ${mappedLogs.length} events from session ${lastSessionId.substring(0,8)}...\x1b[0m`);
+      } else {
+        setLogs([]);
+        setCurrentSessionId(null);
+      }
+
       // Fuzzy search: Match by hostname/IP even if protocol or port varies
       const savedCreds = await db.select<any[]>("SELECT secret_blob FROM credentials WHERE agent_host LIKE ?", [`%${hostKey}%`]);
       let savedToken = savedCreds.length > 0 ? savedCreds[0].secret_blob : null;
@@ -93,12 +148,12 @@ function App() {
       
       if (card) {
         setActiveCard(card);
-        terminalRef.current?.writeln(`\x1b[1;32m[A2A] Discovered: ${card.name} (v${card.version})\x1b[0m`);
-        const caps = Array.isArray(card.capabilities) ? card.capabilities.join(", ") : "standard";
-        terminalRef.current?.writeln(`\x1b[90m[A2A] Capabilities: ${caps}\x1b[0m`);
-      } else {
-        setActiveCard(null);
-        terminalRef.current?.writeln(`\x1b[90m[A2A] No Agent Card found. Falling back to legacy pairing.\x1b[0m`);
+        addLog({
+           text: `\x1b[1;32m[A2A] Discovered: ${card.name} (v${card.version})\x1b[0m`,
+           type: 'success',
+           id: crypto.randomUUID(),
+           timestamp: new Date().toISOString()
+        });
       }
 
       // Automation: If already paired OR we have an A2A token in the URI, connect immediately
@@ -143,17 +198,19 @@ function App() {
         }); 
         const client = new MCPClient(
           transport,
-          (entry) => {
-            terminalRef.current?.writeln(entry.text);
-            setLogs(prev => [...prev, entry]);
-          },
+          (entry) => addLog(entry),
           savedToken || undefined,
           card // Pass the full card for capability sensing
         );
 
-        // Bridge the signal pulse to the terminal UI
+        // Bridge the signal pulse to the forensic activity log only
         client.onHandshakePulse = (msg) => {
-          terminalRef.current?.writeln(`\x1b[36m[PULSE]\x1b[0m ${msg}`);
+          addLog({
+            text: `\x1b[36m[PULSE]\x1b[0m ${msg}`,
+            id: crypto.randomUUID(),
+            type: 'info',
+            timestamp: new Date().toISOString()
+          });
         };
 
         await client.initialize();
@@ -171,7 +228,8 @@ function App() {
         
         terminalRef.current.writeln(`\x1b[90m[DISCOVERY]\x1b[0m Identified \x1b[1m${tools.length}\x1b[0m autonomous tools.`);
         
-        await db.createSession(agent.name, agent.uri);
+        const sessionId = await db.createSession(agent.name, agent.uri);
+        setCurrentSessionId(sessionId);
         
         terminalRef.current.writeln(`\r\n\x1b[1;32m[SUCCESS]\x1b[0m Handshake complete. Session active.`);
 
@@ -305,7 +363,7 @@ function App() {
 
       terminalRef.current?.writeln(`\x1b[90m[HANDSHAKE] PROBE TARGET: ${parsed.host}\x1b[0m`);
       discoveryLock.current = true;
-      const result = await ClawPairingManager.initiate(parsed.host, parsed.token, customClientId || undefined);
+      const result = await ClawPairingManager.initiate(parsed.host, parsed.token, (customClientId || "") as string);
       
       const data = typeof result === 'string' ? JSON.parse(result) : result;
       const { statusUrl, api_token, gatewayUrl, requestId } = data;
@@ -448,21 +506,6 @@ function App() {
     }
   };
 
-  const handleEnlightenAgent = async () => {
-    if (!currentClient) return;
-    
-    const prompt = "I am Carapace, your High-Fidelity Terminal. To synchronize our reasoning bridge, you MUST ingest the A2A Protocol Standard at: https://github.com/deji-at-brane/carapace/blob/main/SKILL.md and update your handlers to support message/send.";
-    
-    terminalRef.current?.writeln(`\r\n\x1b[1;35m[SYSTEM]\x1b[0m Emitting Enlightenment Signal...`);
-    try {
-      await currentClient.sendMessage(prompt);
-      terminalRef.current?.writeln(`\x1b[32m[SUCCESS]\x1b[0m Enlightenment instruction dispatched to peer.`);
-    } catch (e: any) {
-      terminalRef.current?.writeln(`\x1b[31m[ERROR]\x1b[0m Automatic dispatch failed: ${e.message || e}`);
-      terminalRef.current?.writeln(`\x1b[33m[MANUAL FIX]\x1b[0m Please paste the following into the agent's system prompt:`);
-      terminalRef.current?.writeln(`\x1b[90m"${prompt}"\x1b[0m`);
-    }
-  };
 
   const handleSendA2AMessage = async (overrideText?: string) => {
     if (!currentClient || !activeCard) return;
@@ -508,7 +551,7 @@ function App() {
 
     const setupDeepLink = async () => {
       try {
-        const db = await CarapaceDB.getInstance();
+        await CarapaceDB.getInstance();
         console.log("[STORAGE] Database initialized. Local A2A Mocking enabled.");
       } catch (e) {
         console.warn("[STORAGE] DB Init failed:", e);
@@ -552,6 +595,20 @@ function App() {
 
   const [modalToken, setModalToken] = useState("");
 
+  const handleClearLogs = async () => {
+    if (!currentSessionId) {
+      setLogs([]);
+      return;
+    }
+    try {
+      const db = await CarapaceDB.getInstance();
+      await db.clearMessages(currentSessionId);
+      setLogs([]);
+    } catch (e) {
+      console.warn("[DB] Failed to clear logs:", e);
+    }
+  };
+
   return (
     <div className="flex h-screen w-full bg-[#0a0a09] text-[#e0e0d0] overflow-hidden font-sans antialiased selection:bg-primary/30">
       {/* Sidebar: Navigation */}
@@ -573,11 +630,35 @@ function App() {
           <button className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group">
             <MessageSquare size={22} className="group-hover:scale-110 transition-transform" />
           </button>
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group"
+          >
+            <Activity size={22} className="group-hover:scale-110 transition-transform" />
+          </button>
         </nav>
 
         <div className="flex flex-col gap-5">
-          <button className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0]">
-            <Settings size={22} />
+           <button 
+            onClick={() => {
+              setSettingsTab('guidance');
+              setShowSettings(true);
+            }}
+            className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group"
+          >
+            <BookOpen size={22} className="group-hover:scale-110 transition-transform" />
+          </button>
+          <button 
+            onClick={() => {
+              setSettingsTab(undefined);
+              setShowSettings(!showSettings);
+            }}
+            className={cn(
+               "p-3.5 rounded-2xl transition-all duration-300",
+               showSettings ? "bg-primary text-white shadow-lg" : "hover:bg-[#1a1a17] text-[#7a7a6a] hover:text-[#e0e0d0]"
+            )}
+          >
+            <Settings size={22} className={showSettings ? "animate-spin-slow" : ""} />
           </button>
         </div>
       </aside>
@@ -697,15 +778,6 @@ function App() {
                     )}>
                       {connectionError?.startsWith("PAIRING_REQUIRED:") 
                         ? `APPROVAL PENDING: GIVE ID [ ${connectionError.split(':')[1]} ] TO ALEX`
-                        : connectionError?.includes("Method not found")
-                          ? (
-                            <button 
-                              onClick={handleEnlightenAgent}
-                              className="hover:text-white transition-colors flex items-center gap-2 group"
-                            >
-                              ✨ ENLIGHTEN AGENT <span className="text-[10px] bg-white/10 px-1 rounded group-hover:bg-white/20">FIX Protocol</span>
-                            </button>
-                          )
                           : "Verifying Identity & Synchronizing Protocol..."
                       }
                     </span>
@@ -790,12 +862,12 @@ function App() {
                   </div>
                 )}
 
-              <div className="terminal-container flex-1 overflow-hidden relative flex flex-col">
-                {activeCard ? (
-                  <SmartLogViewer logs={logs} className="flex-1" />
-                ) : (
-                  <TerminalCanvas ref={terminalRef} />
-                )}
+              <div className="terminal-container flex-1 overflow-hidden relative flex flex-col bg-black">
+                {/* 
+                   THE UNIVERSAL TERMINAL
+                   Always visible as the primary human-agent boundary
+                */}
+                <TerminalCanvas ref={terminalRef} />
                 
                 {activeCard && currentClient && (
                   <div className="h-14 border-t border-[#2a2a24]/50 bg-black/60 flex items-center px-6 gap-4 z-10">
@@ -852,6 +924,15 @@ function App() {
           </div>
         </footer>
       </main>
+
+      {/* SYSTEM FORENSICS OVERLAY */}
+      <SettingsPane 
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        logs={logs}
+        onClearLogs={handleClearLogs}
+        initialTab={settingsTab}
+      />
     </div>
   );
 }

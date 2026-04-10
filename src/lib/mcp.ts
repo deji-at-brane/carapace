@@ -58,7 +58,7 @@ class WebSocketTransport implements Transport {
   private messageCallback?: (msg: any) => void;
   private queue: any[] = [];
 
-  constructor(private url: string) {
+  constructor(public url: string) {
     this.connect();
   }
 
@@ -70,14 +70,6 @@ class WebSocketTransport implements Transport {
       try {
         const data = JSON.parse(event.data);
         
-        // Handle A2A Notification Stream (Common for autonomous agents)
-        if (data.method === "tasks/update" || data.method === "task/progress" || data.method === "task/updated") {
-          const update = data.params?.task || data.params;
-          const taskId = update?.id || data.params?.taskId;
-          if (taskId) {
-            this.handleTaskUpdate(update, taskId, `task:${taskId}`);
-          }
-        }
 
         if (data.type === "connected") {
           console.log("[WS] Ignition Poke: Connection established.");
@@ -131,7 +123,7 @@ class WebSocketTransport implements Transport {
 class MockTransport implements Transport {
   private messageCallback?: (msg: any) => void;
 
-  constructor(private url: string) {
+  constructor(public url: string) {
     console.log(`[MOCK] Initialized for ${url}`);
   }
 
@@ -446,45 +438,53 @@ export class MCPClient {
   private signalMethod: string = "message/send";
   private baseUrl: string = "";
   private isPascalCase: boolean = false;
+  
+  // 🩺 Stability Flags
+  private handshakeConfirmed: boolean = false;
+  public onHandshakePulse?: (msg: string) => void;
+  public sessionId?: string;
 
   private methodMap: Record<string, string> = {
-    "tools/call": "tools/call",
-    "tasks/step": "tasks/step",
-    "tasks/get": "tasks/get",
-    "task/status": "tasks/get"
+    "tools/call": "CallTool",
+    "tasks/create": "CreateTask",
+    "tasks/step": "StepTask",
+    "tasks/get": "GetTask",
+    "message/send": "SendMessage",
+    "initialize": "Initialize"
   };
 
   constructor(
     private transport: Transport, 
     onLog?: (entry: LogEntry) => void, 
     authToken?: string, 
-    private card?: any
+    private card?: any,
+    onHandshakePulse?: (msg: string) => void
   ) {
     this.onLog = onLog;
     this.authToken = authToken || null;
+    this.onHandshakePulse = onHandshakePulse;
     this.baseUrl = this.card?.endpoints?.a2a || "";
+
+    this.handshakePromise = new Promise((resolve, reject) => {
+      this.resolveHandshake = resolve;
+      this.rejectHandshake = reject;
+    });
+
+    // Auto-detect A2A PascalCase dialect
+    if (this.card || (transport as any).url?.includes("/a2a")) {
+      this.isPascalCase = true;
+    }
 
     // CRITICAL: Register message callback before ANY early returns
     this.transport.onMessage((msg) => this.handleIncoming(msg));
 
     // A2A Mode Logic: sensing capabilities
-    const capabilities = this.card?.capabilities || [];
-    const isA2A = !!this.card;
-    if (isA2A) {
-      // The Carapace Standard: Agents must support message/send
-      this.signalMethod = "message/send";
+    if (this.isPascalCase) {
+      this.signalMethod = "SendMessage";
       console.log(`[A2A] Universal Client synchronized for ${this.card?.name || 'Remote Agent'}.`);
+      this.resolveHandshake();
       return;
     }
-
-    // Initialize the handshake guard for Legacy V3
-    this.handshakePromise = new Promise((resolve, reject) => {
-      this.resolveHandshake = () => {
-        this.handshakeConfirmed = true;
-        resolve();
-      };
-      this.rejectHandshake = reject;
-    });
 
     // If no token is provided, we might still be able to connect if the gateway allows anonymous
     // or if the session is already restored. We'll resolve after a short buffer if no challenge appears.
@@ -496,6 +496,11 @@ export class MCPClient {
         }
       }, 1000);
     }
+  }
+
+  private mapMethod(method: string): string {
+    if (!this.isPascalCase) return method;
+    return this.methodMap[method] || method;
   }
 
 
@@ -726,14 +731,11 @@ export class MCPClient {
         else resolve(res.result);
       });
       
-      const finalMethod = this.isPascalCase ? (this.methodMap[method] || method) : method;
+      const finalMethod = this.mapMethod(method);
       this.transport.send({ jsonrpc: "2.0", id, method: finalMethod, params });
     });
   }
 
-  private notify(method: string, params: any = {}) {
-    this.transport.send({ jsonrpc: "2.0", method, params });
-  }
 
   private getHeaders() {
     return {
@@ -843,7 +845,7 @@ export class MCPClient {
         if (!absoluteBase.includes("://")) absoluteBase = `http://${absoluteBase}`;
         
         const urlObj = new URL(absoluteBase);
-        urlObj.searchParams.set("sessionId", targetSessionId);
+        urlObj.searchParams.set("sessionId", targetSessionId || "");
         const url = urlObj.toString();
         
         // HEARTBEAT: Log to both terminal and activity log
@@ -1141,7 +1143,7 @@ export class ClawPairingManager {
   /**
    * Orchestrates the multi-stage handshake with automatic protocol discovery.
    */
-  private static async runDiscovery(host: string, bootstrapToken: string, customClientId?: string) {
+  private static async runDiscovery(host: string, bootstrapToken: string, customClientId?: string): Promise<string | null> {
     let lastError: Error | null = null;
     const identity = IdentityManager.getIdentity();
     const deviceId = await IdentityManager.sha256Fingerprint(identity.rawPublicKey);
@@ -1152,16 +1154,16 @@ export class ClawPairingManager {
       : HANDSHAKE_PRESETS;
 
     for (const preset of probeList) {
-      if (getLock().aborted) return false;
+      if (getLock().aborted) return null;
       let activeHost = host;
 
       for (const role of ["operator", "client"]) {
-        if (getLock().aborted) return false;
+        if (getLock().aborted) return null;
         let attempts = 0;
         const maxAttempts = 2;
 
         while (attempts < maxAttempts) {
-          if (getLock().aborted) return false;
+          if (getLock().aborted) return null;
           try {
             this.onHandshakePulse?.(`[HANDSHAKE] Probing ${activeHost} (as ${preset.id}, role: ${role})...`);
 
@@ -1219,7 +1221,7 @@ export class ClawPairingManager {
               const fatalMsg = "Fatal: Bootstrap Token expired. Generate a fresh code in Alex.";
               setLock({ ...getLock(), aborted: true });
               this.onHandshakePulse?.(`[STOP] ${fatalMsg}`);
-              return false; // Break the Discovery loop entirely
+              return null; // Break the Discovery loop entirely
             }
 
             // If the server explicitly rejected the ID or schema, we skip this preset/role combo immediately.
@@ -1261,6 +1263,7 @@ export class ClawPairingManager {
     
     try {
       const resultJson = await this.runDiscovery(wsUrl, bootstrapToken, customClientId);
+      if (!resultJson) throw new Error("Discovery session was aborted or failed without identity match.");
     
       // Determine base URL for credential storage
       let finalGateway = wsUrl;
@@ -1332,7 +1335,8 @@ export function createTransport(uri: string, token?: string, options: { streamUr
         headers["Authorization"] = `Bearer ${tokenFromUri}`;
       }
       const httpUri = finalUri.replace(/^a2a:/, "http:");
-      return new SSETransport(httpUri, headers, options);
+      const sseOptions = { ...options, streamUrl: httpUri + (httpUri.endsWith("/") ? "stream" : "/stream") };
+      return new SSETransport(httpUri, headers, sseOptions);
     }
 
     if (url.protocol === "claw:" || url.protocol === "agent:") {
@@ -1356,8 +1360,8 @@ export function parseAgentUri(uri: string) {
   try {
     // Basic normalization: if it's just an IP or host, prefix it
     let normalized = uri.trim();
-    if (!normalized.includes("://")) {
-      normalized = `ws://${normalized}`;
+    if (!normalized.includes("://") && normalized.length > 0) {
+      normalized = `a2a://${normalized}`;
     }
     
     const url = new URL(normalized);

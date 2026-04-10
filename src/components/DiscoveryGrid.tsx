@@ -4,7 +4,6 @@ import { CarapaceDB } from "@/lib/db";
 import { ScrollArea } from "./ui/scroll-area";
 import { Search, Globe, Zap, ShieldCheck, ArrowRight, Loader2 } from "lucide-react";
 import { A2AManager } from "@/lib/a2a";
-import { cn } from "@/lib/utils";
 
 interface DiscoveryGridProps {
   searchTerm: string;
@@ -112,16 +111,6 @@ export function DiscoveryGrid({ searchTerm, onConnect }: DiscoveryGridProps) {
             <h1 className="text-4xl font-extrabold tracking-tighter text-white">System Ready</h1>
             <p className="text-lg text-[#7a7a6a] font-medium">Connect to an agent or browse the central registry.</p>
           </div>
-          <button 
-            onClick={async () => {
-              const db = await CarapaceDB.getInstance();
-              await db.seedAgents();
-              fetchAgents();
-            }}
-            className="px-4 py-2 bg-[#1a1a17] hover:bg-primary/20 hover:text-primary border border-[#2a2a24] rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg active:scale-95"
-          >
-            Sync Registry
-          </button>
         </div>
 
         {/* 🛰️ DIRECT CONNECT PANEL */}
@@ -210,7 +199,7 @@ export function DiscoveryGrid({ searchTerm, onConnect }: DiscoveryGridProps) {
               <Search size={48} className="text-[#3a3a30]" />
               <div className="text-center">
                 <h3 className="text-xl font-bold text-white mb-2">No agents found</h3>
-                <p className="text-sm text-[#7a7a6a]">The registry appears to be empty. Use Direct Connect or Sync Registry.</p>
+                <p className="text-sm text-[#7a7a6a]">The registry appears to be empty. Use Direct Connect to add an agent.</p>
               </div>
             </div>
           ) : (

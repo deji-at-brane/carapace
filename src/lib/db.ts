@@ -70,10 +70,10 @@ export class CarapaceDB {
   async seedAgents() {
     console.log("[DB] Synchronizing Discovery Hub agent registry...");
     const defaultAgents = [
-      { id: "local-debug-1", name: "Local Protocol Debugger", description: "Internal A2A node for diagnostic verification.", uri: "http://localhost:1425", category: "INTERNAL", icon_name: "Activity" },
-      { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "agent://research.carapace.io", category: "Research", icon_name: "Compass" },
-      { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "agent://code.carapace.io", category: "Development", icon_name: "Terminal" },
-      { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "agent://analysis.carapace.io", category: "Analysis", icon_name: "LayoutGrid" }
+      { id: "local-debug-1", name: "Local Protocol Debugger", description: "Internal A2A node for diagnostic verification.", uri: "a2a://localhost:1425", category: "INTERNAL", icon_name: "Activity" },
+      { id: "researcher-1", name: "Cloud Researcher", description: "Deep web searching and document synthesis node.", uri: "a2a://research.carapace.io", category: "Research", icon_name: "Compass" },
+      { id: "coder-1", name: "Logic Architect", description: "High-context coding assistant with multi-file awareness.", uri: "a2a://code.carapace.io", category: "Development", icon_name: "Terminal" },
+      { id: "analyst-1", name: "Data Sentinel", description: "Real-time log analysis and pattern recognition engine.", uri: "a2a://analysis.carapace.io", category: "Analysis", icon_name: "LayoutGrid" }
     ];
 
     for (const agent of defaultAgents) {
@@ -119,7 +119,7 @@ export class CarapaceDB {
 
   async deleteCredential(host: string) {
     // Normalize host to ensure we match the stored format
-    const normalized = host.replace("claw://", "").replace("agent://", "").split("?")[0].split("/")[0];
+    const normalized = host.replace("a2a://", "").replace("claw://", "").replace("agent://", "").split("?")[0].split("/")[0];
     await this.execute(
       "DELETE FROM credentials WHERE agent_host LIKE ?",
       [`%${normalized}%`]
@@ -143,6 +143,17 @@ export class CarapaceDB {
     await this.execute("DELETE FROM agents WHERE id = ?", [id]);
   }
 
+  async getMessages(sessionId: string): Promise<any[]> {
+    return this.select<any[]>(
+      "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
+      [sessionId]
+    );
+  }
+
+  async clearMessages(sessionId: string) {
+    await this.execute("DELETE FROM messages WHERE session_id = ?", [sessionId]);
+  }
+
   async upsertAgent(agent: Omit<Agent, "created_at">) {
     await this.execute(
       "INSERT INTO agents (id, name, description, uri, category, icon_name) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uri) DO UPDATE SET name = excluded.name, description = excluded.description",
@@ -154,7 +165,7 @@ export class CarapaceDB {
     // We join agents with credentials based on the host part of the URI
     // This allows the UI to know which agents are already "Known" and "Paired"
     const query = `
-      SELECT a.*, (SELECT COUNT(*) FROM credentials WHERE agent_host LIKE '%' || REPLACE(REPLACE(a.uri, 'claw://', ''), 'agent://', '') || '%') as is_paired
+      SELECT a.*, (SELECT COUNT(*) FROM credentials WHERE agent_host LIKE '%' || REPLACE(REPLACE(REPLACE(a.uri, 'a2a://', ''), 'claw://', ''), 'agent://', '') || '%') as is_paired
       FROM agents a
       ORDER BY a.created_at DESC
     `;
