@@ -90,7 +90,19 @@ export class A2AManager {
       console.log(`[A2A] Discovered Agent (Fuzzy Match): ${validatedCard.name}`);
       return validatedCard;
     } catch (e) {
-      console.error(`[A2A] Discovery error at ${wellKnownUrl}:`, e);
+      console.warn(`[A2A] Discovery failed at ${wellKnownUrl}. Checking protocol fallback...`);
+      
+      // 🛡️ PROTOCOL FALLBACK: If discovery fails but we are using a2a://, synthesize a basic card
+      // This ensures that pre-seeded or private a2a agents always use the Federated Auth UI path.
+      if (baseUrl.startsWith("a2a://")) {
+        return {
+          name: "A2A Federated Agent",
+          description: "Agent synchronized via protocol scheme.",
+          version: "1.0.0",
+          capabilities: ["mcp", "federation"],
+          endpoints: { a2a: baseUrl }
+        };
+      }
       return null;
     }
   }

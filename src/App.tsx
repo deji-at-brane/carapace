@@ -161,6 +161,7 @@ function App() {
     setActiveCard(null);
     setConnectionError(null);
     setCurrentPulse(null);
+    setIsConnecting(true); // 🛡️ PREVENT FLICKER: Suppress modals until discovery is complete
     setSelectedAgent(agent);
     
     // Wait for terminal mount
@@ -683,15 +684,6 @@ function App() {
         </div>
         
         <nav className="flex-1 flex flex-col gap-5">
-          <button 
-            onClick={() => setSelectedAgent(null)}
-            className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group"
-          >
-            <Compass size={22} className="group-hover:scale-110 transition-transform" />
-          </button>
-          <button className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group">
-            <MessageSquare size={22} className="group-hover:scale-110 transition-transform" />
-          </button>
           <button 
             onClick={() => setShowSettings(true)}
             className="p-3.5 hover:bg-[#1a1a17] rounded-2xl transition-all duration-300 text-[#7a7a6a] hover:text-[#e0e0d0] group"

@@ -188,32 +188,6 @@ export function DiscoveryGrid({ searchTerm, onConnect }: DiscoveryGridProps) {
           )}
         </div>
 
-        <div className="space-y-6">
-          <div className="flex items-center gap-3">
-            <Search className="w-5 h-5 text-gray-500" />
-            <h2 className="text-sm font-bold uppercase tracking-tighter text-gray-400">Registry Nodes</h2>
-          </div>
-
-          {filteredAgents.length === 0 ? (
-            <div className="py-20 flex flex-col items-center justify-center space-y-4 opacity-50 bg-[#0f0f0d] rounded-3xl border border-dashed border-[#2a2a24]">
-              <Search size={48} className="text-[#3a3a30]" />
-              <div className="text-center">
-                <h3 className="text-xl font-bold text-white mb-2">No agents found</h3>
-                <p className="text-sm text-[#7a7a6a]">The registry appears to be empty. Use Direct Connect to add an agent.</p>
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredAgents.map((agent) => (
-                <AgentCard 
-                  key={agent.id} 
-                  agent={agent} 
-                  onConnect={onConnect} 
-                />
-              ))}
-            </div>
-          )}
-        </div>
       </div>
     </ScrollArea>
   );
