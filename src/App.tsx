@@ -50,6 +50,68 @@ function App() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const discoveryLock = useRef(false);
+  const isRestored = useRef(false);
+
+  // 🏛️ PERSISTENCE: Restore previous session context on startup
+  useEffect(() => {
+    if (isRestored.current) return;
+    
+    const restoreSession = async () => {
+      try {
+        const db = await CarapaceDB.getInstance();
+        const lastSession = await db.getLastSession();
+        
+        if (lastSession) {
+          const agent = await db.getAgentByUri(lastSession.agent_uri);
+          if (agent) {
+             console.log(`[PERSISTENCE] Resuming context for ${agent.name}...`);
+             setSelectedAgent(agent);
+             setCurrentSessionId(lastSession.id);
+             
+             const messages = await db.getMessages(lastSession.id);
+             const restoredLogs: LogEntry[] = messages.map(m => ({
+               id: m.id,
+               type: m.role as any,
+               text: m.content,
+               timestamp: m.timestamp,
+               raw: m.metadata ? JSON.parse(m.metadata) : undefined
+             }));
+             
+             setLogs(restoredLogs);
+             
+             // Wait for terminal layout to stabilize
+             setTimeout(() => {
+               if (terminalRef.current) {
+                 terminalRef.current.clear();
+                 terminalRef.current.writeln(`\x1b[90m[PERSISTENCE] Restored session context: ${agent.name}\x1b[0m`);
+                 
+                 // Show historical Elite messages
+                 restoredLogs.forEach(entry => {
+                   const isElite = 
+                     entry.type === 'message' || 
+                     entry.type === 'success' || 
+                     entry.type === 'error' ||
+                     entry.text.includes("[SUCCESS]") ||
+                     entry.text.includes("Handshake complete");
+                   
+                   if (isElite) {
+                     terminalRef.current?.writeln(entry.text);
+                   }
+                 });
+                 
+                 terminalRef.current.writeln(`\r\n\x1b[1;33m[OFFLINE]\x1b[0m History reloaded. Click \x1b[1;32mConnect\x1b[0m to initiate new pairing.`);
+               }
+             }, 300);
+          }
+        }
+        isRestored.current = true;
+      } catch (e) {
+        console.warn("[App] Restoration failed:", e);
+      }
+    };
+    
+    restoreSession();
+  }, []);
 
   const addLog = async (entry: LogEntry, forceShowInTerminal = false) => {
      // ELITE FILTER: Only write high-value messages to the terminal

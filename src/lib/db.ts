@@ -104,7 +104,32 @@ export class CarapaceDB {
       "INSERT INTO messages (id, session_id, role, content, metadata) VALUES (?, ?, ?, ?, ?)",
       [id, sessionId, role, content, JSON.stringify(metadata || {})]
     );
+    
+    // Asynchronously prune old history to keep the DB lean
+    this.pruneOldMessages().catch(e => console.warn("[DB] Pruning failed:", e));
+    
     return id;
+  }
+
+  async pruneOldMessages() {
+    // 1. Delete messages older than 30 days
+    await this.execute("DELETE FROM messages WHERE timestamp < datetime('now', '-30 days')");
+    
+    // 2. Delete sessions that no longer have any messages and are older than 30 days
+    await this.execute(`
+      DELETE FROM sessions 
+      WHERE created_at < datetime('now', '-30 days')
+      AND id NOT IN (SELECT DISTINCT session_id FROM messages)
+    `);
+    
+    console.log("[DB] 30-day retention policy synchronized.");
+  }
+
+  async globalPurge() {
+    console.log("[DB] Executing manual high-level purge...");
+    await this.execute("DELETE FROM messages");
+    await this.execute("DELETE FROM sessions");
+    // We keep 'agents' and 'credentials' as they are part of the verified registry
   }
 
   async saveCredential(host: string, token: string, type: string = "api_token") {
@@ -148,6 +173,21 @@ export class CarapaceDB {
       "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
       [sessionId]
     );
+  }
+
+  async getLastSession(): Promise<any | null> {
+    const sessions = await this.select<any[]>(
+      "SELECT * FROM sessions ORDER BY created_at DESC LIMIT 1"
+    );
+    return sessions.length > 0 ? sessions[0] : null;
+  }
+
+  async getAgentByUri(uri: string): Promise<Agent | null> {
+    const agents = await this.select<any[]>(
+      "SELECT * FROM agents WHERE uri = ?",
+      [uri]
+    );
+    return agents.length > 0 ? agents[0] : null;
   }
 
   async clearMessages(sessionId: string) {

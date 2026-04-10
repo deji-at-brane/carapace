@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { X, Shield, Activity, Database, Cpu, Zap, Key, Server, Globe, BookOpen, Info, ExternalLink } from "lucide-react";
+import { X, Shield, Activity, Database, Cpu, Zap, Key, Server, Globe, BookOpen, Info, ExternalLink, Clock, ShieldAlert } from "lucide-react";
 import { SmartLogViewer } from "./SmartLogViewer";
 import { LogEntry } from "../lib/mcp";
 import { cn } from "../lib/utils";
@@ -225,7 +225,45 @@ export const SettingsPane: React.FC<SettingsPaneProps> = ({
                   </div>
                 </div>
 
-                <div className="mt-8 flex flex-col items-center justify-center flex-1 border border-dashed border-white/5 rounded-2xl opacity-40">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
+                  <div className="p-6 bg-primary/5 border border-primary/20 rounded-2xl space-y-4">
+                    <div className="flex items-center gap-3">
+                      <Clock className="text-primary" size={20} />
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-primary">Retention Policy</h4>
+                    </div>
+                    <p className="text-[10px] text-gray-400 font-mono leading-relaxed">
+                      All messages and session telemetry older than <span className="text-white">30 DAYS</span> are automatically purged to maintain local performance.
+                    </p>
+                    <div className="flex items-center gap-2 text-[9px] text-emerald-500 font-bold uppercase tracking-tighter">
+                      <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                      Circular Buffer Active
+                    </div>
+                  </div>
+
+                  <div className="p-6 bg-red-500/5 border border-red-500/20 rounded-2xl space-y-4">
+                    <div className="flex items-center gap-3">
+                      <ShieldAlert className="text-red-500" size={20} />
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-red-500">Security Purge</h4>
+                    </div>
+                    <p className="text-[10px] text-gray-400 font-mono leading-relaxed">
+                      Immediately wipe all historical messages and session logs from this device. (Registry & Credentials preserved).
+                    </p>
+                    <button 
+                      onClick={async () => {
+                        if (confirm("NUCLEAR OPTION: Wipe all session history? This cannot be undone.")) {
+                          const db = await CarapaceDB.getInstance();
+                          await db.globalPurge();
+                          if (onClearLogs) onClearLogs();
+                        }
+                      }}
+                      className="w-full py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-500 text-[10px] font-bold uppercase rounded-lg transition-all"
+                    >
+                      Clear All History
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-8 flex flex-col items-center justify-center flex-1 border border-dashed border-white/5 rounded-2xl opacity-20">
                   <Cpu size={32} className="mb-3 text-gray-600" />
                   <p className="text-[10px] uppercase tracking-[0.2em] font-mono">Telemetry stream synchronized</p>
                 </div>
