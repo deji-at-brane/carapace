@@ -73,7 +73,7 @@ export function AgentSidebarList({ searchTerm, selectedAgentId, onSelect, onDele
   return (
     <div className="flex flex-col h-full bg-[#0f0f0d]/50 backdrop-blur-xl border-r border-[#2a2a24]/50 w-80 shrink-0 relative">
       <div className="p-6 border-b border-[#2a2a24]/30">
-        <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[#4a4a40]">Active Nodes</h2>
+        <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[#4a4a40]">Active Agents</h2>
       </div>
 
       <ScrollArea className="flex-1">

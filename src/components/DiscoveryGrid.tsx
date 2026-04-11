@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
-import { AgentCard, Agent } from "./AgentCard";
+import { Agent } from "./AgentCard";
 import { CarapaceDB } from "@/lib/db";
 import { ScrollArea } from "./ui/scroll-area";
-import { Search, Globe, Zap, ShieldCheck, ArrowRight, Loader2 } from "lucide-react";
+import { Globe, Zap, ShieldCheck, ArrowRight, Loader2 } from "lucide-react";
 import { A2AManager } from "@/lib/a2a";
 
 interface DiscoveryGridProps {
@@ -10,7 +10,7 @@ interface DiscoveryGridProps {
   onConnect?: (agent: Agent) => void;
 }
 
-export function DiscoveryGrid({ searchTerm, onConnect }: DiscoveryGridProps) {
+export function DiscoveryGrid({ searchTerm: _searchTerm, onConnect }: DiscoveryGridProps) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -89,11 +89,7 @@ export function DiscoveryGrid({ searchTerm, onConnect }: DiscoveryGridProps) {
     }
   };
 
-  const filteredAgents = agents.filter(agent => 
-    agent.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    agent.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    agent.category.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+
 
   if (loading && agents.length === 0) {
     return (

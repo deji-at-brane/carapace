@@ -4,7 +4,6 @@ import {
   Settings, 
   Search, 
   MessageSquare,
-  Compass,
   ShieldCheck,
   Zap,
   Activity,
